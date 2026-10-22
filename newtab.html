@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>New Tab · Command Bar</title>
+  <link rel="icon" href="icons/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <div class="ambient" aria-hidden="true"></div>
+  <header class="page-header">
+    <div class="brand"><img src="icons/mark.svg" alt="" width="32" height="32"><span>command<span class="brand-for">FOR DIA</span></span></div>
+    <button class="icon-button page-settings" data-settings aria-label="Customize command bar"></button>
+  </header>
+  <main class="stage">
+    <div class="intro"><span class="eyebrow">A LITTLE SPACE TO THINK</span><h1>Where to next?</h1></div>
+    <section class="palette" aria-label="Command bar">
+      <div class="search-row">
+        <span class="search-icon" aria-hidden="true"></span>
+        <input id="query" type="text" placeholder="Search or enter a URL…" autocomplete="off" autocapitalize="off" spellcheck="false" role="combobox" aria-label="Search tabs, bookmarks, history, or the web" aria-autocomplete="list" aria-controls="results" aria-expanded="true">
+        <button id="clear" class="icon-button clear-button" aria-label="Clear search" hidden></button>
+        <button id="dismiss" class="escape-key" aria-label="Dismiss command bar">esc</button>
+      </div>
+      <div class="filter-row" role="group" aria-label="Search scope">
+        <button class="filter active" data-filter="all" aria-pressed="true">Everything</button>
+        <button class="filter" data-filter="tabs" aria-pressed="false">Tabs <span>@</span></button>
+        <button class="filter" data-filter="bookmarks" aria-pressed="false">Bookmarks <span>*</span></button>
+        <button class="filter" data-filter="history" aria-pressed="false">History <span>#</span></button>
+        <button class="filter" data-filter="actions" aria-pressed="false">Actions <span>&gt;</span></button>
+      </div>
+      <div class="result-area">
+        <div class="section-label"><span id="result-heading">PICK UP WHERE YOU LEFT OFF</span><span id="result-count"></span></div>
+        <div id="results" role="listbox" aria-label="Suggestions"></div>
+        <div id="empty" class="empty-state" hidden></div>
+        <p id="autocomplete-status" role="status" aria-live="polite" hidden></p>
+      </div>
+      <footer class="palette-footer"><div class="key-hints"><span><kbd>↑</kbd><kbd>↓</kbd> to navigate</span><span><kbd>↵</kbd> <span id="enter-hint">to open</span></span></div><button class="footer-settings" data-settings aria-label="Customize command bar"></button></footer>
+    </section>
+    <div class="below-palette"><span class="tiny-spark">✦</span><span>Less clicking. More going.</span><button id="shortcut-hint" title="Configure keyboard shortcut">⌘ ⇧ L <span>from any page</span></button></div>
+    <p id="status" role="status" aria-live="polite"></p>
+  </main>
+  <footer class="page-footer"><span>A calmer corner of your browser.</span><span id="local-note"><i></i> Yours, and only yours.</span></footer>
+  <dialog id="settings-dialog" aria-labelledby="settings-title">
+    <div class="settings-heading"><div><span class="eyebrow">MAKE YOURSELF AT HOME</span><h2 id="settings-title">Your command bar</h2></div><button id="close-settings" class="icon-button" aria-label="Close settings"></button></div>
+    <div class="setting"><label for="theme">Appearance</label><select id="theme"><option value="system">Match system</option><option value="light">Light</option><option value="dark">Dark</option></select></div>
+    <div class="setting"><span id="accent-label">A touch of color</span><div class="swatches" role="group" aria-labelledby="accent-label"><button data-accent="lilac" aria-label="Lilac" aria-pressed="true"></button><button data-accent="sage" aria-label="Sage" aria-pressed="false"></button><button data-accent="rose" aria-label="Rose" aria-pressed="false"></button><button data-accent="sand" aria-label="Sand" aria-pressed="false"></button></div></div>
+    <div class="setting"><label for="engine">Search engine</label><select id="engine"><option value="default">Browser default</option><option value="google">Google</option><option value="duckduckgo">DuckDuckGo</option><option value="bing">Bing</option><option value="brave">Brave</option></select></div>
+    <div class="setting"><div><label for="enable-autocomplete">Query autocomplete</label><p id="autocomplete-description">Send typed searches to Google for suggestions.<br>Searches still use your selected engine. Off by default.</p></div><input type="checkbox" role="switch" id="enable-autocomplete" aria-describedby="autocomplete-description"></div>
+    <div class="settings-divider"></div>
+    <div class="setting"><div><label for="enable-new-tab-overlay">New tabs as overlay</label><p id="new-tab-overlay-description">Use ⌘T / Ctrl+T over your previous website.<br>Requires access to websites. Off by default.</p></div><input type="checkbox" role="switch" id="enable-new-tab-overlay" aria-describedby="new-tab-overlay-description"></div>
+    <div class="setting"><div><label for="enable-bookmarks">Search bookmarks</label><p>Bring your saved places into the bar.</p></div><input type="checkbox" role="switch" id="enable-bookmarks"></div>
+    <div class="setting"><div><label for="enable-history">Search history</label><p>Find somewhere you’ve been before.</p></div><input type="checkbox" role="switch" id="enable-history"></div>
+    <div class="privacy-note"><span class="privacy-icon"></span><p>Tabs, bookmarks, and history are matched locally. Query autocomplete contacts Google only when enabled. No analytics or account.</p></div>
+    <button id="configure-shortcut" class="secondary-button">Configure keyboard shortcut <span>↗</span></button>
+    <p class="settings-footnote">New-tab overlay briefly opens and closes a temporary tab. Browser pages keep the full command page. Use the extension shortcut for a direct overlay.</p>
+    <p id="settings-status" role="status" aria-live="polite"></p>
+  </dialog>
+</body>
+</html>

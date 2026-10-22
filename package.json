@@ -1,0 +1,16 @@
+{
+  "name": "dia-command-bar",
+  "version": "1.2.0",
+  "private": true,
+  "type": "module",
+  "description": "An Arc-inspired new tab and command palette for Dia and Chromium browsers.",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "test:browser": "playwright test",
+    "preview": "node scripts/preview.js",
+    "package": "node scripts/package.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1"
+  }
+}
