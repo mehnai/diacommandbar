@@ -5,13 +5,33 @@ import { OVERLAY_ORIGINS } from './core.js';
 export function createNewTabRouter({ browser, pageUrl, openOverlay, dismissOverlay, now = Date.now }) {
   const activeKey = windowId => `active-tab:${windowId}`;
   const pendingKey = tabId => `new-tab:${tabId}`;
-  const isNewTab = url => url === pageUrl || /^(?:chrome|dia|arc):\/\/(?:newtab|new-tab-page)\/?$/.test(url || '');
+  // Dia bypasses chrome_url_overrides and uses a start-page UUID instead.
+  // Ignore deeper paths/query strings that may refer to an existing chat.
+  const isDiaHome = url => /^(?:chrome|dia):\/\/start-page\/(?:[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\/?)?$/i.test(url || '');
+  const isNewTab = url => url === pageUrl || isDiaHome(url) || /^(?:chrome|dia|arc):\/\/(?:newtab|new-tab-page)\/?$/.test(url || '');
   let queue = Promise.resolve();
   const serialize = operation => {
     const next = queue.then(operation);
     queue = next.catch(console.error);
     return next;
   };
+
+  async function redirectDiaHome(tabId, expectedUrl) {
+    const key = pendingKey(tabId);
+    const record = (await browser.storage.session.get(key))[key];
+    if (!record || record.redirected || now() - record.createdAt > 10000) return;
+    try {
+      const tab = await browser.tabs.get(tabId);
+      const destination = tab.pendingUrl || tab.url;
+      if (!tab.active || tab.pinned || tab.discarded || tab.windowId !== record.windowId || destination !== expectedUrl || !isDiaHome(destination)) return;
+      // Claim once before navigating. The command page will consume this same
+      // record for the optional overlay handoff when a previous website exists.
+      await browser.storage.session.set({ [key]: { ...record, redirected: true } });
+      await browser.tabs.update(tabId, { url: pageUrl });
+    } catch {
+      await browser.storage.session.remove(key); // The tab may have closed.
+    }
+  }
 
   // Keep the previous selection across service-worker suspension. Do not guess
   // a website when no previous selection in this window has been observed.
@@ -22,22 +42,33 @@ export function createNewTabRouter({ browser, pageUrl, openOverlay, dismissOverl
     }
   });
   browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
-    serialize(() => browser.storage.session.set({ [activeKey(windowId)]: tabId }));
+    serialize(async () => {
+      await browser.storage.session.set({ [activeKey(windowId)]: tabId });
+      const record = (await browser.storage.session.get(pendingKey(tabId)))[pendingKey(tabId)];
+      if (!record || record.redirected || now() - record.createdAt > 10000) return;
+      // Dia creates an inactive placeholder with an opener, then activates it.
+      // Either activation or the subsequent URL event can arrive first.
+      const tab = await browser.tabs.get(tabId).catch(() => null);
+      const url = tab?.pendingUrl || tab?.url;
+      if (isDiaHome(url)) await redirectDiaHome(tabId, url);
+    });
   });
   browser.tabs.onCreated.addListener(tab => {
     // Explicit destinations, background tabs, and restored/discarded tabs must
     // never be treated as disposable new-tab placeholders.
     const url = tab.pendingUrl || tab.url;
-    if (!tab.active || tab.discarded || (url && (!isNewTab(url) || url === pageUrl))) return;
+    if (tab.pinned || tab.discarded || (url && url !== 'about:blank' && (!isNewTab(url) || url === pageUrl))) return;
     const createdAt = now();
     serialize(async () => {
       const sourceId = (await browser.storage.session.get(activeKey(tab.windowId)))[activeKey(tab.windowId)];
-      if (!sourceId || sourceId === tab.id) return;
-      await browser.storage.session.set({ [pendingKey(tab.id)]: { sourceId, windowId: tab.windowId, createdAt } });
+      const canHandoff = tab.active && tab.openerTabId === undefined && url !== 'about:blank';
+      await browser.storage.session.set({ [pendingKey(tab.id)]: { sourceId: sourceId === tab.id ? undefined : sourceId, windowId: tab.windowId, createdAt, canHandoff } });
+      if (isDiaHome(url)) await redirectDiaHome(tab.id, url);
     });
   });
   browser.tabs.onUpdated.addListener((tabId, change) => {
-    if (change.url && !isNewTab(change.url)) serialize(() => browser.storage.session.remove(pendingKey(tabId)));
+    if (isDiaHome(change.url)) serialize(() => redirectDiaHome(tabId, change.url));
+    else if (change.url && !isNewTab(change.url)) serialize(() => browser.storage.session.remove(pendingKey(tabId)));
   });
   browser.tabs.onRemoved.addListener(tabId => { serialize(() => browser.storage.session.remove(pendingKey(tabId))); });
   browser.windows.onRemoved.addListener(windowId => { serialize(() => browser.storage.session.remove(activeKey(windowId))); });
@@ -51,7 +82,7 @@ export function createNewTabRouter({ browser, pageUrl, openOverlay, dismissOverl
       await browser.storage.session.remove(key); // A reload can never try again.
       return value;
     });
-    if (!record || now() - record.createdAt > 10000) return { routed: false };
+    if (!record?.sourceId || (!record.canHandoff && !record.redirected) || now() - record.createdAt > 10000) return { routed: false };
     const { settings } = await browser.storage.local.get('settings');
     if (settings?.newTabOverlay !== true || !(await browser.permissions.contains({ origins: OVERLAY_ORIGINS }))) return { routed: false };
 
