@@ -21,7 +21,7 @@ The browser still creates a new tab first. When that fresh, empty tab loads the 
 
 This uses the standard `chrome_url_overrides.newtab` override; it cannot reassign the browser's reserved shortcut. If a Dia entry point bypasses that override, use the extension shortcut or toolbar button instead.
 
-Use **⌘⇧L** or the toolbar icon for the Arc-style overlay. On internal browser pages, the Chrome Web Store, or pages that block embedding, it opens a separate command tab. Customize the shortcut at `chrome://extensions/shortcuts`; some browser and system shortcuts cannot be reassigned. When a new tab opens, the browser may keep keyboard focus in its address bar. Click the command field or use the extension shortcut to focus it.
+Use **⌘⇧L** or the toolbar icon for the Arc-style overlay. On internal browser pages, the Chrome Web Store, or pages that block embedding, it opens a separate command tab. Invoking it on an existing command page focuses that page's search field and preserves your query, without opening another tab or requesting host access. Customize the shortcut at `chrome://extensions/shortcuts`; some browser and system shortcuts cannot be reassigned. When a new tab opens, the browser may keep keyboard focus in its address bar. Click the command field or use the extension shortcut to focus it.
 
 ## Use it
 
@@ -41,6 +41,8 @@ Use **⌘⇧L** or the toolbar icon for the Arc-style overlay. On internal brows
 | `⌘,` / `Ctrl+,` | Customize the command bar |
 
 The overlay opens destinations in a new tab so your current page stays available. Selecting an open tab switches to it. Selecting a destination from the full new-tab page uses that tab, unless you hold Command/Control. New-tab overlay mode closes only the empty tab it just received; your existing tabs stay open.
+
+The overlay background is transparent, with no page dimming or blur. Its embedded page is clipped to the visible controls so an opaque browser canvas cannot hide the surrounding website. Drag the small grip at the top to move the bar; double-click it to center the bar again. You can also focus the grip with Shift+Tab from the search field, move it with the arrow keys (Shift for larger steps), and press Home to center it. The bar stays within the window when results grow or the window resizes, and starts centered each time it opens. Dragging uses native pointer events with no added dependencies or permissions.
 
 Settings include system/light/dark appearance, four accent colors, the browser's default search provider or Google/DuckDuckGo/Bing/Brave, optional bookmark/history access, query autocomplete, and new-tab overlay mode. Preferences are stored locally in this browser profile.
 
@@ -66,7 +68,7 @@ There are no runtime dependencies, remote scripts, remote fonts, or analytics. T
 - Optional `https://suggestqueries.google.com/*` host access: requested for query autocomplete. The browser's permission prompt covers the host, even though the extension only fetches its autocomplete endpoint.
 - Optional `http://*/*` and `https://*/*` host access: requested only when you enable **New tabs as overlay**, to draw over the previous website without an extension-button gesture. It does not enable autocomplete or send page contents anywhere. Disabling this option removes the broad grants and can require renewing Google autocomplete access.
 
-The embedded command page verifies its extension origin and a per-tab token before accepting privileged operations. External websites cannot issue browser commands through a `postMessage` bridge. Website text is rendered as text, never HTML. Executable URLs and URLs containing credentials are rejected.
+The embedded command page verifies its extension origin and a per-tab token before accepting privileged operations. Window messages carry only control bounds and outside-click dismissal; external websites cannot issue browser commands through them. Website text is rendered as text, never HTML. Executable URLs and URLs containing credentials are rejected.
 
 ## Develop and verify
 
@@ -85,7 +87,7 @@ The preview is at `http://127.0.0.1:4173`. It is explicitly marked as a design p
 
 Browser tests load the real extension into an isolated Chromium profile and cover the new-tab override and overlay handoff, tab switching, navigation, settings, overlay lifecycle, restricted-page fallback, authorization boundaries, and autocomplete/website permission interactions. Optional hosts are pre-granted through Chromium's extension-management API because the headless driver cannot accept native permission dialogs; the actual toggles, permission checks, revocation, and network path are exercised. Unit tests cover handoff races, stale placeholders, and explicit destinations. Provider responses are deterministic; tests also cover stale requests, source filters, malformed responses, and network failures. Preview tests cover keyboard use and narrow layouts. Visual captures are written to `test-results/`.
 
-`npm run package` produces a clean unpacked folder and `dist/dia-command-bar-1.2.0.zip`. Load the folder into the browser; unzip the archive before loading it. The ZIP is suitable for sharing or preparing a store submission, but has not been published or reviewed by a browser store.
+`npm run package` produces a clean unpacked folder and `dist/dia-command-bar-1.2.3.zip`. Load the folder into the browser; unzip the archive before loading it. The ZIP is suitable for sharing or preparing a store submission, but has not been published or reviewed by a browser store.
 
 ## Platform references
 

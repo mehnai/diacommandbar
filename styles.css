@@ -116,11 +116,19 @@
   html:has(body.overlay), body.overlay { background: transparent; }
   /* A dark iframe color scheme on a light host forces an opaque UA canvas. */
   html:has(body.overlay) { color-scheme: normal; }
+  body.overlay { min-width: 0; overflow: hidden; }
   [data-theme=dark] .overlay dialog { color-scheme: dark; }
+  .overlay dialog::backdrop { background: transparent; backdrop-filter: none; }
   .overlay .ambient, .overlay .page-header, .overlay .intro, .overlay .page-footer, .overlay .below-palette { display: none; }
-  .overlay .stage { padding-top: clamp(35px, 17vh, 180px); }
-  .overlay .palette { background: var(--panel); }
-  .overlay .result-area { min-height: 0; }
+  .overlay .stage { position: fixed; left: 50%; top: clamp(35px, 17vh, 180px); transform: translateX(-50%); padding: 0; }
+  .overlay .palette { position: relative; display: flex; flex-direction: column; max-height: calc(100dvh - 48px); background: var(--panel); animation: none; }
+  .overlay .search-row, .overlay .filter-row, .overlay .palette-footer { flex-shrink: 0; }
+  .overlay .result-area { min-height: 0; overflow-y: auto; }
+  #drag-handle { position: absolute; top: 1px; left: calc(50% - 36px); width: 72px; height: 18px; padding: 0; border-radius: 6px; background: transparent; cursor: grab; touch-action: none; user-select: none; }
+  #drag-handle::after { content: ''; display: block; margin: auto; width: 30px; height: 3px; border-radius: 3px; background: var(--subtle); opacity: .55; }
+  #drag-handle:hover::after, #drag-handle:focus-visible::after { opacity: 1; }
+  #drag-handle:focus-visible { outline-offset: -2px; }
+  .overlay.dragging, .overlay.dragging #drag-handle { cursor: grabbing; user-select: none; }
   .overlay #status { background: var(--panel); border-radius: 5px; }
   .overlay #status:empty { background: none; }
   @keyframes arrive { from { transform: translateY(7px) scale(.99); opacity: 0; } to { transform: none; opacity: 1; } }

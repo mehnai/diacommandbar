@@ -57,7 +57,81 @@ async function send(message) {
   return response.data;
 }
 
-function status(text, settings = false) { $(settings ? '#settings-status' : '#status').textContent = text; }
+function status(text, settings = false) { $(settings ? '#settings-status' : '#status').textContent = text; syncOverlayBounds(); }
+
+function syncOverlayBounds() {
+  if (!overlay || window.parent === window) return;
+  const rect = (dialog.open ? dialog : $('.palette')).getBoundingClientRect();
+  const note = !dialog.open && $('#status').textContent ? $('#status').getBoundingClientRect() : rect;
+  // Geometry only: browser data and actions still use authenticated runtime
+  // messages. The host validates the sending frame and extension origin.
+  window.parent.postMessage({ type: 'dia-command-bar-layout', rect: [Math.min(rect.left, note.left), Math.min(rect.top, note.top), Math.max(rect.right, note.right), Math.max(rect.bottom, note.bottom)] }, '*');
+}
+
+function enableDragging() {
+  const stage = $('.stage');
+  const handle = $('#drag-handle');
+  let drag;
+  handle.hidden = false;
+  const place = (x, y) => {
+    const { width, height } = stage.getBoundingClientRect();
+    stage.style.left = `${Math.max(8, Math.min(x, innerWidth - width - 8))}px`;
+    stage.style.top = `${Math.max(8, Math.min(y, innerHeight - height - 8))}px`;
+    stage.style.transform = 'none';
+    syncOverlayBounds();
+  };
+  const constrain = () => {
+    const rect = stage.getBoundingClientRect();
+    if (rect.left < 8 || rect.top < 8 || rect.right > innerWidth - 8 || rect.bottom > innerHeight - 8) place(rect.left, rect.top);
+    syncOverlayBounds();
+  };
+  const center = () => {
+    stage.style.left = stage.style.top = stage.style.transform = '';
+    constrain();
+  };
+  const stop = () => {
+    const pointerId = drag?.id;
+    drag = null;
+    document.body.classList.remove('dragging');
+    if (pointerId !== undefined && handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+  };
+  handle.addEventListener('pointerdown', event => {
+    if (!event.isPrimary || event.button !== 0) return;
+    event.preventDefault();
+    const rect = stage.getBoundingClientRect();
+    drag = { id: event.pointerId, x: event.clientX - rect.left, y: event.clientY - rect.top };
+    handle.setPointerCapture(event.pointerId);
+    document.body.classList.add('dragging');
+  });
+  handle.addEventListener('pointermove', event => {
+    if (drag?.id === event.pointerId) place(event.clientX - drag.x, event.clientY - drag.y);
+  });
+  for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) handle.addEventListener(type, stop);
+  handle.addEventListener('dblclick', center);
+  handle.addEventListener('keydown', event => {
+    const step = event.shiftKey ? 40 : 10;
+    const delta = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[event.key];
+    if (!delta && event.key !== 'Home') return;
+    event.preventDefault();
+    if (!delta) return center();
+    const rect = stage.getBoundingClientRect();
+    place(rect.left + delta[0], rect.top + delta[1]);
+  });
+  window.addEventListener('blur', stop);
+  window.addEventListener('resize', constrain);
+  // Results can grow after a drag; keep the footer and grip within reach.
+  new ResizeObserver(constrain).observe(stage);
+  new ResizeObserver(syncOverlayBounds).observe(dialog);
+  window.addEventListener('message', event => {
+    if (event.source === window.parent && event.data?.type === 'dia-command-bar-dismiss') {
+      if (dialog.open) dialog.close();
+      else dismiss();
+    }
+  });
+  // Publish the first bounds synchronously: a fully clipped iframe may not
+  // receive ResizeObserver callbacks until the browser starts painting it.
+  constrain();
+}
 
 function applySettings() {
   const { theme, accent, engine } = state.settings;
@@ -177,6 +251,7 @@ function render() {
   }
   query.setAttribute('aria-expanded', String(results.length > 0));
   select(selected, false);
+  syncOverlayBounds();
 }
 
 function select(index, scroll = true) {
@@ -213,8 +288,8 @@ async function dismiss() {
   else { query.value = ''; setFilter('all'); }
 }
 
-function openSettings() { status('', true); dialog.showModal(); syncAutocomplete(); }
-function closeSettings() { dialog.close(); query.focus(); }
+function openSettings() { status('', true); dialog.showModal(); syncAutocomplete(); syncOverlayBounds(); }
+function closeSettings() { dialog.close(); query.focus(); syncOverlayBounds(); }
 
 async function saveSettings(update) {
   const previous = { ...state.settings };
@@ -323,7 +398,7 @@ document.querySelectorAll('[data-settings]').forEach(button => button.addEventLi
 $('#clear').addEventListener('click', () => { query.value = ''; setFilter('all'); });
 $('#dismiss').addEventListener('click', dismiss);
 $('#close-settings').addEventListener('click', closeSettings);
-dialog.addEventListener('close', () => { query.focus(); syncAutocomplete(); });
+dialog.addEventListener('close', () => { query.focus(); syncAutocomplete(); syncOverlayBounds(); });
 dialog.addEventListener('click', event => { if (event.target === dialog) { const r = dialog.getBoundingClientRect(); if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) closeSettings(); } });
 document.body.addEventListener('click', event => { if (overlay && !dialog.open && !event.target.closest('.palette, dialog, #status')) dismiss(); });
 $('#theme').addEventListener('change', event => saveSettings({ theme: event.target.value }));
@@ -339,6 +414,18 @@ window.addEventListener('focus', () => { if (!dialog.open) { refresh(); if (over
 document.addEventListener('visibilitychange', syncAutocomplete);
 window.addEventListener('pagehide', cancelAutocomplete);
 if (extension) {
+  if (!overlay && window.top === window.self) {
+    chrome.tabs.getCurrent().then(tab => {
+      if (!tab?.id) return;
+      chrome.runtime.onMessage.addListener((message, sender, respond) => {
+        if (sender.id !== chrome.runtime.id || sender.tab || message?.type !== 'focus-command-bar' || message.tabId !== tab.id) return;
+        if (dialog.open) dialog.close();
+        window.focus();
+        query.focus({ preventScroll: true });
+        respond({ focused: true });
+      });
+    }).catch(() => {});
+  }
   chrome.permissions.onRemoved.addListener(() => { cancelAutocomplete(); render(); refresh(); });
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes.settings) { cancelAutocomplete(); render(); refresh(); }
@@ -362,6 +449,7 @@ if (window.top !== window.self && (!overlay || !params.get('token'))) {
 } else {
   if (preview) { $('#local-note').textContent = 'Design preview · sample tabs'; document.title = 'Command Bar · Design Preview'; }
   applySettings(); render();
+  if (overlay) enableDragging();
   if (extension && overlay) send({ type: 'overlay-ready' }).catch(() => {});
   const initialize = async () => {
     if (extension && !overlay && !location.search && !location.hash) {

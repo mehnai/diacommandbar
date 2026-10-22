@@ -3,6 +3,7 @@ import { createAutocompleteService } from './autocomplete.js';
 import { createNewTabRouter } from './newtab-router.js';
 
 const pageUrl = chrome.runtime.getURL('newtab.html');
+const isCommandPage = url => typeof url === 'string' && url.split(/[?#]/, 1)[0] === pageUrl;
 const overlayKey = tabId => `overlay:${tabId}`;
 let settingsQueue = Promise.resolve();
 const allowedSettings = {
@@ -32,6 +33,7 @@ async function dismissOverlay(tabId) {
     await chrome.scripting.executeScript({ target: { tabId }, func: () => {
       const overlay = globalThis.__diaCommandBar;
       if (!overlay) return;
+      overlay.cleanup?.();
       overlay.host.remove();
       if (overlay.previousFocus?.isConnected) overlay.previousFocus.focus({ preventScroll: true });
       delete globalThis.__diaCommandBar;
@@ -44,8 +46,18 @@ async function openPalette(tab, { fallback = true, toggle = true } = {}) {
     if (fallback) await chrome.tabs.create({ url: `${pageUrl}?source=shortcut` });
     return false;
   }
-  if (tab.url?.startsWith(pageUrl)) {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => document.querySelector('#query')?.focus() });
+  // New-tab overrides can retain a chrome:// URL in tabs.get/query. Confirm
+  // that our document is loaded before treating such a tab as our own page.
+  const nativeNewTab = /^(?:chrome|dia|arc):\/\/(?:newtab|new-tab-page)\/?(?:[?#].*)?$/.test(tab.url || '');
+  const commandTab = isCommandPage(tab.url) || (nativeNewTab && (await chrome.runtime.getContexts({ contextTypes: ['TAB'], tabIds: [tab.id] })).some(context => isCommandPage(context.documentUrl)));
+  if (commandTab) {
+    // scripting.executeScript cannot target extension pages. Ask the page's
+    // own code to focus its input, addressing only this tab.
+    try {
+      if ((await chrome.runtime.sendMessage({ type: 'focus-command-bar', tabId: tab.id }))?.focused) return false;
+    } catch { /* An older page may have lost its listener after an update. */ }
+    const current = await chrome.tabs.get(tab.id).catch(() => null);
+    if (current && current.url === tab.url && !current.pendingUrl) await chrome.tabs.reload(tab.id);
     return false;
   }
   const token = crypto.randomUUID();
@@ -56,6 +68,7 @@ async function openPalette(tab, { fallback = true, toggle = true } = {}) {
       func: (url, toggle) => {
         if (globalThis.__diaCommandBar) {
           const old = globalThis.__diaCommandBar;
+          old.cleanup?.();
           old.host.remove();
           if (old.previousFocus?.isConnected) old.previousFocus.focus({ preventScroll: true });
           delete globalThis.__diaCommandBar;
@@ -64,15 +77,31 @@ async function openPalette(tab, { fallback = true, toggle = true } = {}) {
         const previousFocus = document.activeElement;
         const host = document.createElement('div');
         host.setAttribute('data-dia-command-bar', '');
-        for (const [key, value] of Object.entries({ all: 'initial', position: 'fixed', inset: '0', width: '100vw', height: '100vh', 'z-index': '2147483647', display: 'block', 'background-color': 'rgba(28, 22, 40, .18)', 'backdrop-filter': 'blur(5px)' })) host.style.setProperty(key, value, 'important');
+        for (const [key, value] of Object.entries({ all: 'initial', position: 'fixed', inset: '0', width: '100vw', height: '100vh', 'z-index': '2147483647', display: 'block', 'background-color': 'transparent', 'backdrop-filter': 'none' })) host.style.setProperty(key, value, 'important');
         const shadow = host.attachShadow({ mode: 'closed' });
         const frame = document.createElement('iframe');
         frame.src = url;
         frame.title = 'Dia Command Bar';
-        frame.style.cssText = 'position:absolute;inset:0;border:0;width:100%;height:100%;color-scheme:normal;background:transparent;';
+        // Clip to the actual controls. Some browser compositors paint an
+        // opaque iframe canvas even when its document is transparent.
+        frame.style.cssText = 'position:absolute;inset:0;border:0;width:100%;height:100%;color-scheme:normal;background:transparent;clip-path:inset(50%);';
+        const frameUrl = new URL(url);
+        const origin = `${frameUrl.protocol}//${frameUrl.host}`;
+        const layout = event => {
+          if (!event.isTrusted || event.source !== frame.contentWindow || event.origin !== origin || event.data?.type !== 'dia-command-bar-layout') return;
+          const rect = event.data.rect;
+          if (!Array.isArray(rect) || rect.length !== 4 || !rect.every(Number.isFinite)) return;
+          const [left, top, right, bottom] = rect;
+          if (right <= left || bottom <= top) return;
+          frame.style.clipPath = `inset(${Math.max(0, top)}px ${Math.max(0, innerWidth - right)}px ${Math.max(0, innerHeight - bottom)}px ${Math.max(0, left)}px round 18px)`;
+        };
+        window.addEventListener('message', layout);
+        host.addEventListener('click', event => {
+          if (event.target === host) frame.contentWindow.postMessage({ type: 'dia-command-bar-dismiss' }, origin);
+        });
         shadow.append(frame);
         document.documentElement.append(host);
-        globalThis.__diaCommandBar = { host, previousFocus, frame };
+        globalThis.__diaCommandBar = { host, previousFocus, frame, cleanup: () => window.removeEventListener('message', layout) };
         frame.addEventListener('load', () => frame.focus(), { once: true });
         frame.focus();
         return 'opened';
