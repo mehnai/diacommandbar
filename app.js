@@ -1,4 +1,5 @@
-import { buildResults, parseQuery, DEFAULT_SETTINGS, autocompleteQuery, AUTOCOMPLETE_ORIGIN, OVERLAY_ORIGINS } from './core.js';
+import { buildResults, parseQuery, DEFAULT_SETTINGS, normalizeSettings, autocompleteQuery, AUTOCOMPLETE_ORIGIN, OVERLAY_ORIGINS } from './core.js';
+import { createSettingsUI } from './settings-ui.js';
 
 const paths = {
   search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/>',
@@ -24,7 +25,12 @@ const overlay = params.get('mode') === 'overlay';
 const extension = !!globalThis.chrome?.runtime?.id;
 const preview = !extension;
 let state = { settings: { ...DEFAULT_SETTINGS }, permissions: { bookmarks: false, history: false }, tabs: [], bookmarks: [], history: [], shortcut: '' };
-let filter = 'all';
+let filter = DEFAULT_SETTINGS.defaultScope;
+let settingsLoaded = false;
+let restoreOverlayPosition = () => {};
+let persistOverlayPosition = () => {};
+let recenterOverlay = () => {};
+const statusTimers = {};
 let results = [];
 let selected = 0;
 let requestId = 0;
@@ -47,9 +53,9 @@ if (overlay) {
 $('.search-icon').innerHTML = icon('search');
 $('#clear').innerHTML = icon('close');
 $('#close-settings').innerHTML = icon('close');
-$('.privacy-icon').innerHTML = icon('shield');
-document.querySelectorAll('[data-settings]').forEach(button => { button.innerHTML = icon('settings') + (button.classList.contains('footer-settings') ? '<span>Customize</span>' : ''); });
-if (!overlay) $('#dismiss').hidden = true;
+$('#dismiss').hidden = !overlay;
+document.querySelectorAll('[data-modifier]').forEach(key => { key.textContent = (mac ? '⌘' : 'Ctrl') + key.dataset.modifier; });
+const settingsUI = createSettingsUI({ dialog, onChange: changeSetting, onReset: restoreDefaults, onShortcut: configureShortcut, clearStatus: () => status('', true), modifier: mac ? '⌘' : 'Ctrl' });
 
 async function send(message) {
   const response = await chrome.runtime.sendMessage(message);
@@ -57,7 +63,11 @@ async function send(message) {
   return response.data;
 }
 
-function status(text, settings = false) { $(settings ? '#settings-status' : '#status').textContent = text; syncOverlayBounds(); }
+function status(text, settings = false) {
+  const id = settings ? '#settings-status' : '#status';
+  clearTimeout(statusTimers[id]); $(id).textContent = text; syncOverlayBounds();
+  if (text) statusTimers[id] = setTimeout(() => { $(id).textContent = ''; syncOverlayBounds(); }, 2800);
+}
 
 function syncOverlayBounds() {
   if (!overlay || window.parent === window) return;
@@ -65,13 +75,14 @@ function syncOverlayBounds() {
   const note = !dialog.open && $('#status').textContent ? $('#status').getBoundingClientRect() : rect;
   // Geometry only: browser data and actions still use authenticated runtime
   // messages. The host validates the sending frame and extension origin.
-  window.parent.postMessage({ type: 'dia-command-bar-layout', rect: [Math.min(rect.left, note.left), Math.min(rect.top, note.top), Math.max(rect.right, note.right), Math.max(rect.bottom, note.bottom)] }, '*');
+  window.parent.postMessage({ type: 'dia-command-bar-layout', radius: dialog.open ? state.settings.radius + 4 : state.settings.radius, rect: [Math.min(rect.left, note.left), Math.min(rect.top, note.top), Math.max(rect.right, note.right), Math.max(rect.bottom, note.bottom)] }, '*');
 }
 
 function enableDragging() {
   const stage = $('.stage');
   const handle = $('#drag-handle');
   let drag;
+  let restored = false;
   handle.hidden = false;
   const place = (x, y) => {
     const { width, height } = stage.getBoundingClientRect();
@@ -85,15 +96,33 @@ function enableDragging() {
     if (rect.left < 8 || rect.top < 8 || rect.right > innerWidth - 8 || rect.bottom > innerHeight - 8) place(rect.left, rect.top);
     syncOverlayBounds();
   };
+  persistOverlayPosition = () => {
+    if (!state.settings.rememberPos) return;
+    const rect = stage.getBoundingClientRect();
+    const position = stage.style.left ? { x: rect.left, y: rect.top } : null;
+    if (extension) send({ type: 'overlay-position', position }).catch(() => {});
+    else if (position) sessionStorage.setItem('dia-preview-position', JSON.stringify(position));
+    else sessionStorage.removeItem('dia-preview-position');
+  };
+  restoreOverlayPosition = position => {
+    if (restored) return;
+    restored = true;
+    if (state.settings.rememberPos && position && [position.x, position.y].every(Number.isFinite)) place(position.x, position.y);
+    else constrain();
+  };
   const center = () => {
     stage.style.left = stage.style.top = stage.style.transform = '';
-    constrain();
+    constrain(); persistOverlayPosition();
   };
+  recenterOverlay = center;
   const stop = () => {
     const pointerId = drag?.id;
     drag = null;
     document.body.classList.remove('dragging');
-    if (pointerId !== undefined && handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+    if (pointerId !== undefined) {
+      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+      persistOverlayPosition();
+    }
   };
   handle.addEventListener('pointerdown', event => {
     if (!event.isPrimary || event.button !== 0) return;
@@ -115,7 +144,7 @@ function enableDragging() {
     event.preventDefault();
     if (!delta) return center();
     const rect = stage.getBoundingClientRect();
-    place(rect.left + delta[0], rect.top + delta[1]);
+    place(rect.left + delta[0], rect.top + delta[1]); persistOverlayPosition();
   });
   window.addEventListener('blur', stop);
   window.addEventListener('resize', constrain);
@@ -125,7 +154,7 @@ function enableDragging() {
   window.addEventListener('message', event => {
     if (event.source === window.parent && event.data?.type === 'dia-command-bar-dismiss') {
       if (dialog.open) dialog.close();
-      else dismiss();
+      else if (state.settings.outsideDismiss) dismiss();
     }
   });
   // Publish the first bounds synchronously: a fully clipped iframe may not
@@ -133,26 +162,27 @@ function enableDragging() {
   constrain();
 }
 
+function updateClock() {
+  if (overlay || !state.settings.clock) return;
+  const now = new Date();
+  $('#time').textContent = now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: state.settings.hour12 });
+  $('#date').textContent = now.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
+}
+
 function applySettings() {
-  const { theme, accent, engine } = state.settings;
-  document.documentElement.dataset.theme = theme === 'system' ? (dark.matches ? 'dark' : 'light') : theme;
-  document.documentElement.dataset.accent = accent;
-  $('#theme').value = theme;
-  $('#engine').value = engine;
-  document.querySelectorAll('[data-accent]').forEach(button => {
-    if (button.tagName === 'BUTTON') button.setAttribute('aria-pressed', String(button.dataset.accent === accent));
-  });
-  for (const name of ['bookmarks', 'history']) $(`#enable-${name}`).checked = state.permissions[name];
-  $('#enable-autocomplete').checked = state.settings.autocomplete === true && state.permissions.autocomplete === true;
-  $('#enable-new-tab-overlay').checked = state.settings.newTabOverlay === true && state.permissions.newTabOverlay === true;
-  if (state.incognito) {
-    $('#enable-autocomplete').disabled = true;
-    $('#autocomplete-description').textContent = 'Query autocomplete is paused in private browsing.';
-  }
-  if (!preview) $('#local-note').textContent = state.settings.autocomplete && state.permissions.autocomplete && !state.incognito ? 'Query suggestions by Google' : 'Yours, and only yours.';
-  const shortcut = state.shortcut || (preview ? (mac ? '⌘ ⇧ L' : 'Ctrl ⇧ L') : 'Set shortcut');
-  $('#shortcut-hint').replaceChildren(document.createTextNode(shortcut));
-  const label = document.createElement('span'); label.textContent = 'from any page'; $('#shortcut-hint').append(label);
+  const s = state.settings, root = document.documentElement;
+  const theme = s.theme === 'system' ? (dark.matches ? 'dark' : 'light') : s.theme;
+  Object.assign(root.dataset, { theme, accent: s.accent, contrast: s.contrast, selection: s.selection });
+  Object.assign(document.body.dataset, { clock: String(s.clock), position: s.position, background: s.background });
+  const hue = { blue: 255, green: 150, orange: 55, red: 25 }[s.accent];
+  const density = { compact: [6, 11], default: [8, 14], roomy: [11, 18] }[s.density];
+  const font = { dia: 'var(--ui)', serif: 'var(--display)', mono: 'ui-monospace,"SF Mono",Menlo,Consolas,monospace' }[s.font];
+  for (const [key, value] of Object.entries({ accent: hue === undefined ? 'var(--ink)' : `oklch(${theme === 'dark' ? .72 : .55} 0.15 ${hue})`, r: `${s.radius}px`, 'bar-w': `${s.width}px`, 'row-py': `${density[0]}px`, 'pad-y': `${density[1]}px`, font })) root.style.setProperty(`--${key}`, value);
+  $('.clock').hidden = overlay || !s.clock;
+  $('.filter-row').hidden = !s.chips;
+  $('.palette-footer').hidden = !s.hints;
+  settingsUI.update(state);
+  updateClock(); syncOverlayBounds();
 }
 
 async function refresh() {
@@ -161,8 +191,13 @@ async function refresh() {
     const parsed = parseQuery(query.value, filter);
     const next = preview ? previewSnapshot() : await send({ type: 'snapshot', query: parsed.query });
     if (id !== requestId) return;
+    const oldScope = state.settings.defaultScope;
     state = { ...state, ...next };
+    state.settings = normalizeSettings(state.settings);
+    if (!settingsLoaded || oldScope !== state.settings.defaultScope) filter = state.settings.defaultScope;
+    settingsLoaded = true;
     applySettings();
+    restoreOverlayPosition(next.overlayPosition);
     render();
     syncAutocomplete();
     if (next.warnings?.length) status(next.warnings.join(' '));
@@ -184,7 +219,7 @@ function syncAutocomplete() {
       const response = await send({ type: 'autocomplete', input: nextKey, filter: 'all' });
       if (epoch !== suggestionEpoch) return;
       suggestions = response.suggestions;
-      suggestionNote = response.unavailable ? 'Autocomplete is unavailable. You can still search.' : suggestions.length ? 'Query suggestions by Google' : '';
+      suggestionNote = response.unavailable ? 'Autocomplete is unavailable. You can still search.' : suggestions.length ? 'Suggestions from Google' : '';
     } catch {
       if (epoch !== suggestionEpoch) return;
       suggestionNote = 'Autocomplete is unavailable. You can still search.';
@@ -209,9 +244,6 @@ function render() {
     const active = button.dataset.filter === parsed.filter;
     button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active));
   });
-  const headings = { all: parsed.query ? 'BEST MATCHES' : 'PICK UP WHERE YOU LEFT OFF', tabs: 'OPEN TABS', bookmarks: 'SAVED PLACES', history: 'RECENTLY VISITED', actions: 'BROWSER ACTIONS' };
-  $('#result-heading').textContent = headings[parsed.filter];
-  $('#result-count').textContent = results.length ? `${results.length} ${results.length === 1 ? 'result' : 'results'}` : '';
   $('#autocomplete-status').textContent = suggestionNote;
   $('#autocomplete-status').hidden = !suggestionNote;
   list.replaceChildren();
@@ -224,8 +256,9 @@ function render() {
     copy.append(title, subtitle);
     const badge = document.createElement('span'); badge.className = 'result-kind'; badge.textContent = ({ tab: 'Switch to tab', bookmark: 'Bookmark', history: 'History', command: 'Action', search: 'Search', url: 'Website' })[result.kind];
     if (result.suggestion) badge.textContent = 'Suggestion';
-    const arrow = document.createElement('span'); arrow.className = 'result-arrow'; arrow.textContent = '↵'; arrow.setAttribute('aria-hidden', 'true');
-    row.append(symbol, copy, badge, arrow);
+    const number = document.createElement('span'); number.className = 'result-number'; number.textContent = index < 9 ? `${mac ? '⌘' : 'Ctrl+'}${index + 1}` : ''; number.setAttribute('aria-hidden', 'true');
+    symbol.hidden = !state.settings.icons; badge.hidden = !state.settings.kinds; number.hidden = !state.settings.numbers;
+    row.append(symbol, copy, badge, number);
     row.addEventListener('pointermove', () => select(index, false));
     row.addEventListener('mousedown', event => event.preventDefault());
     row.addEventListener('click', event => activate(index, event.metaKey || event.ctrlKey));
@@ -234,18 +267,17 @@ function render() {
   const empty = $('#empty'); empty.hidden = results.length > 0; empty.replaceChildren();
   if (!results.length) {
     const locked = ['bookmarks', 'history'].includes(parsed.filter) && !state.permissions[parsed.filter];
-    const heading = document.createElement('h3');
-    const detail = document.createElement('p');
-    const symbol = document.createElement('span'); symbol.innerHTML = icon(locked ? 'shield' : parsed.filter === 'tabs' ? 'tab' : 'search'); empty.append(symbol);
+    const heading = document.createElement('span');
+    const detail = document.createElement('span'); detail.className = 'empty-detail';
     if (locked) {
-      heading.textContent = `Your ${parsed.filter}, one keystroke away.`;
-      detail.textContent = `Allow ${parsed.filter} access to include them in your search. Everything is matched locally.`;
-      const enable = document.createElement('button'); enable.className = 'secondary-button'; enable.textContent = `Enable ${parsed.filter}`;
+      heading.textContent = `Searching ${parsed.filter} is off.`;
+      detail.textContent = 'Turn it on and they’ll show up here.';
+      const enable = document.createElement('button'); enable.className = 'text-link'; enable.textContent = 'Turn on';
       enable.addEventListener('click', () => setPermission(parsed.filter, true));
       empty.append(heading, detail, enable);
     } else {
-      heading.textContent = parsed.query ? 'No matches here.' : parsed.filter === 'all' ? 'Every good detour starts somewhere.' : `No ${parsed.filter === 'tabs' ? 'other tabs open' : parsed.filter === 'history' ? 'recent history' : 'bookmarks yet'}.`;
-      detail.textContent = parsed.query ? 'Try a different search, or choose Everything to search the web.' : 'Type a website, a thought, or > for browser actions.';
+      heading.textContent = parsed.query ? 'Nothing matches.' : 'Nothing here yet.';
+      detail.textContent = parsed.query ? (parsed.filter === 'all' ? '' : 'Try Everything to search the web.') : 'Type a site, a search, or > for actions.';
       empty.append(heading, detail);
     }
   }
@@ -262,7 +294,7 @@ function select(index, scroll = true) {
     query.setAttribute('aria-activedescendant', active.id);
     if (scroll) active.scrollIntoView({ block: 'nearest' });
   } else query.removeAttribute('aria-activedescendant');
-  $('#enter-hint').textContent = results[selected]?.kind === 'tab' ? 'to switch' : 'to open';
+  $('#enter-hint').textContent = results[selected]?.kind === 'tab' ? 'Switch' : 'Open';
 }
 
 async function activate(index = selected, newTab = false) {
@@ -284,16 +316,24 @@ function setFilter(next) {
 
 async function dismiss() {
   cancelAutocomplete();
-  if (overlay && extension) { try { await send({ type: 'dismiss' }); } catch (error) { status(error.message); } }
-  else { query.value = ''; setFilter('all'); }
+  if (overlay && extension) {
+    try {
+      await send({ type: 'dismiss' });
+      // Closing existing UI needs no new website access after a reset.
+      window.parent.postMessage({ type: 'dia-command-bar-close' }, '*');
+    } catch (error) { status(error.message); }
+  }
+  else { query.value = ''; setFilter(state.settings.defaultScope); }
 }
 
-function openSettings() { status('', true); dialog.showModal(); syncAutocomplete(); syncOverlayBounds(); }
+function openSettings() { if (dialog.open) return; status('', true); settingsUI.update(state); dialog.showModal(); syncAutocomplete(); syncOverlayBounds(); }
 function closeSettings() { dialog.close(); query.focus(); syncOverlayBounds(); }
 
 async function saveSettings(update) {
   const previous = { ...state.settings };
-  state.settings = { ...state.settings, ...update }; applySettings(); render();
+  state.settings = normalizeSettings({ ...state.settings, ...update });
+  if (update.defaultScope) filter = update.defaultScope;
+  applySettings(); render();
   try {
     if (preview) localStorage.setItem('dia-command-preview-settings', JSON.stringify(state.settings));
     else await send({ type: 'settings', settings: update });
@@ -302,8 +342,6 @@ async function saveSettings(update) {
 }
 
 async function setAutocomplete(enabled) {
-  const control = $('#enable-autocomplete');
-  control.disabled = true;
   try {
     if (preview) { status('Load the extension to enable live query autocomplete.', true); return; }
     if (enabled) {
@@ -322,12 +360,10 @@ async function setAutocomplete(enabled) {
     }
     await refresh();
   } catch (error) { status(error.message, true); }
-  finally { control.disabled = !!state.incognito; applySettings(); syncAutocomplete(); }
+  finally { applySettings(); syncAutocomplete(); }
 }
 
 async function setNewTabOverlay(enabled) {
-  const control = $('#enable-new-tab-overlay');
-  control.disabled = true;
   try {
     if (preview) { status('Load the extension to enable new tabs as an overlay.', true); return; }
     if (enabled) {
@@ -341,14 +377,14 @@ async function setNewTabOverlay(enabled) {
       if (!state.settings.autocomplete) await chrome.permissions.remove({ origins: [AUTOCOMPLETE_ORIGIN] });
       // Chromium can fold a narrower Google grant into the broad grant. If
       // revoking it removes both, let the user renew Google access through the
-      // autocomplete switch's own gesture.
+      // autocomplete control’s own gesture.
       const renewAutocomplete = state.settings.autocomplete && !(await chrome.permissions.contains({ origins: [AUTOCOMPLETE_ORIGIN] }));
       if (renewAutocomplete) await saveSettings({ autocomplete: false });
-      status(renewAutocomplete ? 'New-tab overlay is off. Enable Query autocomplete again to restore Google access.' : 'New-tab overlay is off. The extension shortcut still opens an overlay.', true);
+      status(renewAutocomplete ? 'New-tab overlay is off. Enable search suggestions again to restore Google access.' : 'New-tab overlay is off. The extension shortcut still opens an overlay.', true);
     }
     await refresh();
   } catch (error) { status(error.message, true); }
-  finally { control.disabled = false; applySettings(); }
+  finally { applySettings(); }
 }
 
 async function setPermission(name, enabled) {
@@ -356,10 +392,34 @@ async function setPermission(name, enabled) {
     if (preview) { status('Permission controls work when you load the extension in your browser.', true); status('Preview only · Load the extension to connect your browser data.'); return; }
     // Keep this call in the click/change event's user gesture, before any await.
     const accepted = enabled ? await chrome.permissions.request({ permissions: [name] }) : await chrome.permissions.remove({ permissions: [name] });
-    status(enabled && !accepted ? 'Access was not granted. You can enable it whenever you’re ready.' : '', true);
     await refresh();
+    status(enabled && !accepted ? 'Access was not granted. You can enable it whenever you’re ready.' : enabled ? `Done — the bar can now search your ${name}.` : `Turned off. The bar no longer sees your ${name}.`, dialog.open);
   } catch (error) { status(error.message, true); }
   finally { applySettings(); }
+}
+
+function changeSetting(key, value) {
+  if (key === 'autocomplete') return setAutocomplete(value);
+  if (key === 'newTabOverlay') return setNewTabOverlay(value);
+  if (['bookmarks', 'history'].includes(key)) return setPermission(key, value);
+  return saveSettings({ [key]: value }).then(async saved => {
+    if (!saved) return;
+    if (key === 'rememberPos' && value) persistOverlayPosition();
+    if (key === 'rememberPos' && !value && preview) sessionStorage.removeItem('dia-preview-position');
+    await refresh();
+  });
+}
+
+async function restoreDefaults() {
+  cancelAutocomplete();
+  try {
+    if (preview) {
+      localStorage.setItem('dia-command-preview-settings', JSON.stringify(DEFAULT_SETTINGS));
+      sessionStorage.removeItem('dia-preview-position');
+    } else await send({ type: 'reset-settings' });
+    await refresh(); filter = state.settings.defaultScope; render(); recenterOverlay();
+    status(preview ? 'Back to the defaults.' : 'Back to the defaults. Optional permissions removed.', true);
+  } catch (error) { await refresh(); status(error.message, true); }
 }
 
 async function configureShortcut() {
@@ -377,39 +437,32 @@ query.addEventListener('input', event => {
 query.addEventListener('compositionstart', () => { composing = true; syncAutocomplete(); });
 query.addEventListener('compositionend', () => { composing = false; syncAutocomplete(); });
 query.addEventListener('keydown', event => {
-  if (event.isComposing) return;
+  if (event.isComposing || composing) return;
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     event.preventDefault(); select(results.length ? (selected + (event.key === 'ArrowDown' ? 1 : -1) + results.length) % results.length : 0);
   } else if (event.key === 'Enter') { event.preventDefault(); activate(selected, event.metaKey || event.ctrlKey); }
 });
 document.addEventListener('keydown', event => {
-  if (event.isComposing || dialog.open) return;
+  if (event.isComposing || composing || dialog.open) return;
   if (overlay && event.key === 'Tab') {
     const controls = [...document.querySelectorAll('.palette button:not([disabled]), .palette input')].filter(control => control.offsetParent !== null);
     if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls.at(-1)?.focus(); }
     else if (!event.shiftKey && document.activeElement === controls.at(-1)) { event.preventDefault(); controls[0]?.focus(); }
   }
-  if (event.key === 'Escape') { event.preventDefault(); if (query.value) { query.value = ''; setFilter('all'); } else dismiss(); }
+  if (event.key === 'Escape') { event.preventDefault(); if (query.value || filter !== state.settings.defaultScope) { query.value = ''; setFilter(state.settings.defaultScope); } else dismiss(); }
   if ((event.metaKey || event.ctrlKey) && event.key === ',') { event.preventDefault(); openSettings(); }
-  if ((event.metaKey || event.ctrlKey) && /^[1-9]$/.test(event.key) && results[Number(event.key) - 1]) { event.preventDefault(); activate(Number(event.key) - 1); }
+  if ((event.metaKey || event.ctrlKey) && document.activeElement === query && /^[1-9]$/.test(event.key) && results[Number(event.key) - 1]) { event.preventDefault(); activate(Number(event.key) - 1); }
 });
 document.querySelectorAll('[data-filter]').forEach(button => button.addEventListener('click', () => setFilter(button.dataset.filter)));
 document.querySelectorAll('[data-settings]').forEach(button => button.addEventListener('click', openSettings));
-$('#clear').addEventListener('click', () => { query.value = ''; setFilter('all'); });
+$('#clear').addEventListener('click', () => { query.value = ''; setFilter(state.settings.defaultScope); });
 $('#dismiss').addEventListener('click', dismiss);
 $('#close-settings').addEventListener('click', closeSettings);
 dialog.addEventListener('close', () => { query.focus(); syncAutocomplete(); syncOverlayBounds(); });
 dialog.addEventListener('click', event => { if (event.target === dialog) { const r = dialog.getBoundingClientRect(); if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) closeSettings(); } });
-document.body.addEventListener('click', event => { if (overlay && !dialog.open && !event.target.closest('.palette, dialog, #status')) dismiss(); });
-$('#theme').addEventListener('change', event => saveSettings({ theme: event.target.value }));
-$('#engine').addEventListener('change', event => saveSettings({ engine: event.target.value }));
-$('#enable-autocomplete').addEventListener('change', event => setAutocomplete(event.target.checked));
-$('#enable-new-tab-overlay').addEventListener('change', event => setNewTabOverlay(event.target.checked));
-document.querySelectorAll('button[data-accent]').forEach(button => button.addEventListener('click', () => saveSettings({ accent: button.dataset.accent })));
-for (const name of ['bookmarks', 'history']) $(`#enable-${name}`).addEventListener('change', event => setPermission(name, event.target.checked));
-$('#configure-shortcut').addEventListener('click', configureShortcut);
-$('#shortcut-hint').addEventListener('click', configureShortcut);
+document.body.addEventListener('click', event => { if (overlay && state.settings.outsideDismiss && !dialog.open && !event.target.closest('.palette, dialog, #status')) dismiss(); });
 dark.addEventListener('change', applySettings);
+if (!overlay) setInterval(updateClock, 10000);
 window.addEventListener('focus', () => { if (!dialog.open) { refresh(); if (overlay) query.focus(); } });
 document.addEventListener('visibilitychange', syncAutocomplete);
 window.addEventListener('pagehide', cancelAutocomplete);
@@ -432,22 +485,24 @@ if (extension) {
   });
 }
 
-// The local preview is explicitly marked and never pretends these are real tabs.
+// Sample data is confined to the local preview; the extension only uses browser data.
 function previewSnapshot() {
   let settings = { ...DEFAULT_SETTINGS };
-  try { settings = { ...settings, ...JSON.parse(localStorage.getItem('dia-command-preview-settings') || '{}') }; } catch { /* Ignore invalid preview preferences. */ }
-  return { settings, permissions: { bookmarks: false, history: false }, shortcut: mac ? '⌘ ⇧ L' : 'Ctrl ⇧ L', tabs: [
-    { id: 1, title: 'A space for your next big idea', url: 'https://www.notion.so/' },
-    { id: 2, title: 'Your work, in progress · GitHub', url: 'https://github.com/' },
-    { id: 3, title: 'Design something wonderful · Figma', url: 'https://www.figma.com/' },
-    { id: 4, title: 'A little inspiration · Are.na', url: 'https://www.are.na/' },
-  ], bookmarks: [], history: [] };
+  try { settings = normalizeSettings(JSON.parse(localStorage.getItem('dia-command-preview-settings') || '{}')); } catch { /* Ignore invalid preview preferences. */ }
+  let overlayPosition = null;
+  try { overlayPosition = JSON.parse(sessionStorage.getItem('dia-preview-position')); } catch {}
+  return { settings, overlayPosition, permissions: { bookmarks: false, history: false }, shortcut: mac ? '⌘ ⇧ L' : 'Ctrl ⇧ L', tabs: [
+    { id: 1, windowId: 1, title: 'A space for your next big idea', url: 'https://www.notion.so/' },
+    { id: 2, windowId: 1, title: 'Your work, in progress · GitHub', url: 'https://github.com/' },
+    { id: 3, windowId: 2, title: 'Design something wonderful · Figma', url: 'https://www.figma.com/' },
+    { id: 4, windowId: 2, title: 'A little inspiration · Are.na', url: 'https://www.are.na/' },
+  ].filter(tab => settings.allWindows || tab.windowId === 1), bookmarks: [], history: [] };
 }
 
 if (window.top !== window.self && (!overlay || !params.get('token'))) {
   document.body.replaceChildren();
 } else {
-  if (preview) { $('#local-note').textContent = 'Design preview · sample tabs'; document.title = 'Command Bar · Design Preview'; }
+  if (preview) document.title = 'Command Bar · Design Preview';
   applySettings(); render();
   if (overlay) enableDragging();
   if (extension && overlay) send({ type: 'overlay-ready' }).catch(() => {});

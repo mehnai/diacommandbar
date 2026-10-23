@@ -1,4 +1,52 @@
-export const DEFAULT_SETTINGS = Object.freeze({ theme: 'system', accent: 'lilac', engine: 'default', autocomplete: false, newTabOverlay: false });
+export const DEFAULT_SETTINGS = Object.freeze({
+  theme: 'system', accent: 'mono', contrast: 'standard', font: 'dia', density: 'default', radius: 14, width: 620, selection: 'solid',
+  chips: true, icons: true, kinds: true, hints: true, numbers: false,
+  clock: true, hour12: true, position: 'center', background: 'solid',
+  engine: 'default', customUrl: '', autocomplete: false, maxResults: 6, openIn: 'current',
+  defaultScope: 'all', allWindows: true, bookmarks: false, history: false, historyDays: 90,
+  newTabOverlay: false, outsideDismiss: true, rememberPos: false,
+});
+const SETTING_CHOICES = {
+  theme: ['system', 'light', 'dark'], accent: ['mono', 'blue', 'green', 'orange', 'red'], contrast: ['standard', 'high'],
+  font: ['dia', 'serif', 'mono'], density: ['compact', 'default', 'roomy'], selection: ['solid', 'soft'],
+  position: ['center', 'top'], background: ['solid', 'dots'], engine: ['default', 'google', 'duckduckgo', 'bing', 'brave', 'custom'],
+  openIn: ['current', 'new'], defaultScope: ['all', 'tabs', 'bookmarks', 'history', 'actions'], historyDays: [7, 30, 90],
+};
+const SETTING_RANGES = { radius: [0, 24, 2], width: [520, 820, 20], maxResults: [3, 10, 1] };
+
+export function validCustomUrl(value) {
+  if (typeof value !== 'string' || value.length > 2048 || !value.includes('%s')) return false;
+  try {
+    const url = new URL(value.replaceAll('%s', 'test'));
+    return url.protocol === 'https:' && !!url.hostname && !url.username && !url.password;
+  } catch { return false; }
+}
+
+// Shared by the UI and worker: only known, correctly typed values can persist.
+export function settingsPatch(input) {
+  const patch = {};
+  for (const [key, fallback] of Object.entries(DEFAULT_SETTINGS)) {
+    const value = input?.[key];
+    const range = SETTING_RANGES[key];
+    if (SETTING_CHOICES[key]?.includes(value)
+      || (typeof fallback === 'boolean' && typeof value === 'boolean')
+      || (range && Number.isInteger(value) && value >= range[0] && value <= range[1] && (value - range[0]) % range[2] === 0)
+      || (key === 'customUrl' && (value === '' || validCustomUrl(value)))) patch[key] = value;
+  }
+  return patch;
+}
+
+export function normalizeSettings(input) {
+  return { ...DEFAULT_SETTINGS, ...settingsPatch(input) };
+}
+
+export function searchUrl(query, settings) {
+  if (settings.engine === 'custom') {
+    if (!validCustomUrl(settings.customUrl)) throw new Error('Add a valid HTTPS search address with %s in Settings → Search.');
+    return settings.customUrl.replaceAll('%s', encodeURIComponent(query));
+  }
+  return ENGINES[settings.engine] ? `${ENGINES[settings.engine].url}${encodeURIComponent(query)}` : null;
+}
 export const AUTOCOMPLETE_ORIGIN = 'https://suggestqueries.google.com/*';
 export const OVERLAY_ORIGINS = ['http://*/*', 'https://*/*'];
 export const ENGINES = {
@@ -14,7 +62,7 @@ export const COMMANDS = [
   { id: 'history', title: 'Open browser history', subtitle: 'Retrace your steps', icon: 'history', keywords: 'recent visited' },
   { id: 'extensions', title: 'Manage extensions', subtitle: 'Your browser, your way', icon: 'grid', keywords: 'plugins addons' },
   { id: 'shortcuts', title: 'Configure keyboard shortcut', subtitle: 'Choose how you open the command bar', icon: 'keyboard', keywords: 'hotkey keys' },
-  { id: 'settings', title: 'Customize command bar', subtitle: 'Appearance, search, and sources', icon: 'settings', keywords: 'preferences theme dark light' },
+  { id: 'settings', title: 'Settings', subtitle: 'Appearance, search, and sources', icon: 'settings', keywords: 'customize preferences theme dark light' },
 ];
 
 // Deliberately reject executable protocols, credentials, and ambiguous prose.
@@ -90,11 +138,13 @@ export function normalizeSuggestions(payload, query) {
   }).slice(0, 5).map(value => value.trim());
 }
 
-export function buildResults({ input = '', filter = 'all', tabs = [], bookmarks = [], history = [], engine = 'default', suggestions = [] }) {
+export function buildResults({ input = '', filter = 'all', tabs = [], bookmarks = [], history = [], engine = 'default', settings = {}, suggestions = [] }) {
+  const options = normalizeSettings({ engine, ...settings });
+  const engineName = options.engine === 'custom' ? (displayUrl(options.customUrl).split('/')[0] || 'your engine') : ENGINES[options.engine]?.name || 'your default engine';
   const parsed = parseQuery(input, filter);
   const { query } = parsed;
   const scope = parsed.filter;
-  if (scope === 'actions') return COMMANDS.map(c => ({ ...c, kind: 'command' })).filter(c => matchScore(c, query)).sort((a, b) => matchScore(b, query) - matchScore(a, query));
+  if (scope === 'actions') return COMMANDS.map(c => ({ ...c, kind: 'command', subtitle: '' })).filter(c => matchScore(c, query)).sort((a, b) => matchScore(b, query) - matchScore(a, query));
   const sources = [];
   if (scope === 'all' || scope === 'tabs') sources.push(...tabs.map(t => ({ ...t, kind: 'tab', icon: 'tab', subtitle: displayUrl(t.url), tabId: t.id, id: `tab-${t.id}` })));
   if (scope === 'all' || scope === 'bookmarks') sources.push(...bookmarks.map(b => ({ ...b, kind: 'bookmark', icon: 'bookmark', subtitle: displayUrl(b.url), id: `bookmark-${b.id}` })));
@@ -107,19 +157,16 @@ export function buildResults({ input = '', filter = 'all', tabs = [], bookmarks 
     if (item.kind !== 'tab' && seen.has(key)) return false;
     seen.add(key); return true;
   }).map((item, index) => ({ ...item, score: matchScore(item, query) + (item.kind === 'tab' ? 30 : item.kind === 'bookmark' ? 10 : 0), order: index }))
-    .sort((a, b) => b.score - a.score || a.order - b.order).slice(0, query ? 8 : 6);
+    .sort((a, b) => b.score - a.score || a.order - b.order).slice(0, options.maxResults);
   if (scope === 'all' && query) {
     const url = toNavigableUrl(query);
-    const direct = url ? { id: 'navigate', kind: 'url', icon: 'globe', title: query, subtitle: 'Go to website', url }
-      : { id: 'search', kind: 'search', icon: 'search', title: query, subtitle: `Search ${ENGINES[engine]?.name || 'your default search engine'}`, query };
-    const exactTab = url && ranked.findIndex(r => r.kind === 'tab' && canonicalUrl(r.url) === canonicalUrl(url));
-    if (typeof exactTab === 'number' && exactTab >= 0) {
-      const [tab] = ranked.splice(exactTab, 1); ranked.unshift(tab); ranked.splice(1, 0, direct);
-    } else ranked.unshift(direct);
+    const direct = url ? { id: 'navigate', kind: 'url', icon: 'globe', title: displayUrl(url), subtitle: '', url }
+      : { id: 'search', kind: 'search', icon: 'search', title: query, subtitle: `with ${engineName}`, query };
+    ranked.unshift(direct);
     if (autocompleteQuery(input, filter)) {
       ranked.push(...normalizeSuggestions([query, suggestions], query).map(text => ({
         id: `suggestion-${text}`, kind: 'search', suggestion: true, icon: 'search', title: text,
-        subtitle: `Search ${ENGINES[engine]?.name || 'your default search engine'}`, query: text,
+        subtitle: '', query: text,
       })));
     }
   }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { toNavigableUrl, buildResults, parseQuery, matchScore } from '../core.js';
+import { toNavigableUrl, buildResults, parseQuery, matchScore, normalizeSettings, settingsPatch, DEFAULT_SETTINGS, validCustomUrl, searchUrl } from '../core.js';
 
 test('recognizes URLs, local development addresses, Unicode hosts and IPs', () => {
   for (const [input, expected] of [
@@ -23,10 +23,10 @@ test('parses each source shortcut without changing the entered text', () => {
   assert.deepEqual(parseQuery('work', 'tabs'), { filter: 'tabs', query: 'work' });
 });
 
-test('ranks an already open exact URL before navigation and removes duplicate history', () => {
+test('puts the website action first while retaining the matching tab and deduplicating history', () => {
   const results = buildResults({ input: 'github.com', tabs: [{ id: 3, title: 'GitHub', url: 'https://github.com/' }], history: [{ id: 5, title: 'GitHub', url: 'https://github.com/' }] });
-  assert.deepEqual(results.map(r => r.kind), ['tab', 'url']);
-  assert.equal(results[0].tabId, 3);
+  assert.deepEqual(results.map(r => r.kind), ['url', 'tab']);
+  assert.equal(results[1].tabId, 3);
 });
 
 test('keeps duplicate tabs distinct so either can be selected', () => {
@@ -44,4 +44,37 @@ test('ranks multiword matches and ordered abbreviations', () => {
   assert.ok(matchScore({ title: 'Google Calendar' }, 'gcal') > 0);
   assert.ok(matchScore({ title: 'Project status', url: 'https://notion.so/' }, 'project notion') > 0);
   assert.equal(matchScore({ title: 'Project status' }, 'zzxy'), 0);
+});
+
+test('settings migrate legacy accents, preserve preferences, and reject malformed patches', () => {
+  for (const accent of ['lilac', 'sage', 'rose', 'sand']) {
+    const s = normalizeSettings({ accent, theme: 'dark', engine: 'google', autocomplete: true, newTabOverlay: true });
+    assert.equal(s.accent, 'mono');
+    assert.equal(s.theme, 'dark'); assert.equal(s.engine, 'google');
+    assert.equal(s.autocomplete, true); assert.equal(s.newTabOverlay, true);
+    assert.equal(s.clock, true); assert.equal(s.width, 620);
+  }
+  assert.deepEqual(settingsPatch({ radius: 13, width: 9999, historyDays: -1, maxResults: '10', outsideDismiss: 'false', font: 'remote', theme: 'url(evil)', unknown: true }), {});
+  assert.deepEqual(normalizeSettings(null), DEFAULT_SETTINGS);
+});
+
+test('custom searches validate the template and encode words without allowing executable URLs', () => {
+  for (const url of ['javascript:%s', 'file:///%s', 'http://example.com/?q=%s', 'http://localhost:3000/?q=%s', 'https://example.com/no-placeholder', 'https://user:pass@example.com/?q=%s']) assert.equal(validCustomUrl(url), false);
+  const settings = { engine: 'custom', customUrl: 'https://example.com/search?q=%s&also=%s' };
+  assert.equal(searchUrl('a & café#', settings), 'https://example.com/search?q=a%20%26%20caf%C3%A9%23&also=a%20%26%20caf%C3%A9%23');
+  assert.throws(() => searchUrl('words', { engine: 'custom', customUrl: '' }), /valid HTTPS search address/);
+  assert.equal(searchUrl('words', { engine: 'default' }), null);
+  const legacy = { engine: 'custom', customUrl: 'http://example.com/?q=%s' };
+  assert.equal(normalizeSettings(legacy).customUrl, '');
+  assert.deepEqual(settingsPatch({ customUrl: legacy.customUrl }), {});
+  assert.throws(() => searchUrl('private words', legacy), /HTTPS/);
+});
+
+test('result limits apply to local matches without dropping the direct action or Google suggestions', () => {
+  const tabs = Array.from({ length: 12 }, (_, id) => ({ id, title: `Work ${id}`, url: `https://example.com/${id}` }));
+  const results = buildResults({ input: 'work', tabs, settings: { maxResults: 3 }, suggestions: ['work ideas', 'work today'] });
+  assert.equal(results.filter(r => r.kind === 'tab').length, 3);
+  assert.equal(results[0].id, 'search');
+  assert.equal(results.filter(r => r.suggestion).length, 2);
+  assert.equal(buildResults({ input: '@work', tabs, settings: { maxResults: 10 } }).length, 10);
 });

@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, ENGINES, toNavigableUrl, AUTOCOMPLETE_ORIGIN, OVERLAY_ORIGINS } from './core.js';
+import { DEFAULT_SETTINGS, normalizeSettings, settingsPatch, searchUrl, toNavigableUrl, AUTOCOMPLETE_ORIGIN, OVERLAY_ORIGINS } from './core.js';
 import { createAutocompleteService } from './autocomplete.js';
 import { createNewTabRouter } from './newtab-router.js';
 
@@ -6,13 +6,10 @@ const pageUrl = chrome.runtime.getURL('newtab.html');
 const isCommandPage = url => typeof url === 'string' && url.split(/[?#]/, 1)[0] === pageUrl;
 const overlayKey = tabId => `overlay:${tabId}`;
 let settingsQueue = Promise.resolve();
-const allowedSettings = {
-  theme: ['system', 'light', 'dark'], accent: ['lilac', 'sage', 'rose', 'sand'],
-  engine: ['default', ...Object.keys(ENGINES)], autocomplete: [true, false], newTabOverlay: [true, false],
-};
+let resettingPermissions = false;
 const autocomplete = createAutocompleteService({ isAllowed: async () => {
   const { settings } = await chrome.storage.local.get('settings');
-  return settings?.autocomplete === true && await chrome.permissions.contains({ origins: [AUTOCOMPLETE_ORIGIN] });
+  return !resettingPermissions && settings?.autocomplete === true && await chrome.permissions.contains({ origins: [AUTOCOMPLETE_ORIGIN] });
 } });
 const autocompleteClient = sender => `${sender.tab?.id}:${sender.documentId || sender.frameId}`;
 
@@ -88,12 +85,23 @@ async function openPalette(tab, { fallback = true, toggle = true } = {}) {
         const frameUrl = new URL(url);
         const origin = `${frameUrl.protocol}//${frameUrl.host}`;
         const layout = event => {
-          if (!event.isTrusted || event.source !== frame.contentWindow || event.origin !== origin || event.data?.type !== 'dia-command-bar-layout') return;
+          if (!event.isTrusted || event.source !== frame.contentWindow || event.origin !== origin) return;
+          // The existing frame can clean up its own UI after Restore defaults
+          // revokes the website grant needed for further script injection.
+          if (event.data?.type === 'dia-command-bar-close') {
+            window.removeEventListener('message', layout);
+            host.remove();
+            if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+            if (globalThis.__diaCommandBar?.host === host) delete globalThis.__diaCommandBar;
+            return;
+          }
+          if (event.data?.type !== 'dia-command-bar-layout') return;
           const rect = event.data.rect;
           if (!Array.isArray(rect) || rect.length !== 4 || !rect.every(Number.isFinite)) return;
           const [left, top, right, bottom] = rect;
           if (right <= left || bottom <= top) return;
-          frame.style.clipPath = `inset(${Math.max(0, top)}px ${Math.max(0, innerWidth - right)}px ${Math.max(0, innerHeight - bottom)}px ${Math.max(0, left)}px round 18px)`;
+          const radius = Number.isFinite(event.data.radius) ? Math.max(0, Math.min(28, event.data.radius)) : 14;
+          frame.style.clipPath = `inset(${Math.max(0, top)}px ${Math.max(0, innerWidth - right)}px ${Math.max(0, innerHeight - bottom)}px ${Math.max(0, left)}px round ${radius}px)`;
         };
         window.addEventListener('message', layout);
         host.addEventListener('click', event => {
@@ -134,25 +142,32 @@ const routeNewTab = createNewTabRouter({
 async function snapshot(message, sender) {
   const isOverlay = new URL(sender.url).searchParams.get('mode') === 'overlay';
   const saved = await chrome.storage.local.get('settings');
+  const settings = normalizeSettings(saved.settings);
   const permissions = {
     bookmarks: await chrome.permissions.contains({ permissions: ['bookmarks'] }),
     history: await chrome.permissions.contains({ permissions: ['history'] }),
     autocomplete: await chrome.permissions.contains({ origins: [AUTOCOMPLETE_ORIGIN] }),
     newTabOverlay: await chrome.permissions.contains({ origins: OVERLAY_ORIGINS }),
   };
+  if (resettingPermissions) for (const key of Object.keys(permissions)) permissions[key] = false;
   const query = String(message.query || '').slice(0, 500);
+  // Source access always reflects real grants, including permissions retained
+  // from older versions or revoked outside the extension.
+  settings.bookmarks = permissions.bookmarks;
+  settings.history = permissions.history;
   const warnings = [];
   const safe = async (operation, name) => {
     try { return await operation(); } catch { warnings.push(`Could not read ${name}. Try again or check its permission in settings.`); return []; }
   };
   const [tabs, bookmarks, history, shortcuts] = await Promise.all([
-    safe(() => chrome.tabs.query({}), 'tabs'),
+    safe(() => chrome.tabs.query(settings.allWindows ? {} : { windowId: sender.tab.windowId }), 'tabs'),
     permissions.bookmarks ? safe(() => query ? chrome.bookmarks.search(query) : chrome.bookmarks.getRecent(60), 'bookmarks') : [],
-    permissions.history ? safe(() => chrome.history.search({ text: query, maxResults: 80, startTime: Date.now() - 90 * 86400000 }), 'history') : [],
+    permissions.history ? safe(() => chrome.history.search({ text: query, maxResults: 80, startTime: Date.now() - settings.historyDays * 86400000 }), 'history') : [],
     chrome.commands.getAll(),
   ]);
   return {
-    settings: { ...DEFAULT_SETTINGS, ...saved.settings }, permissions, warnings, incognito: !!sender.tab?.incognito,
+    settings, permissions, warnings, incognito: !!sender.tab?.incognito,
+    overlayPosition: settings.rememberPos ? (await chrome.storage.session.get('overlayPosition')).overlayPosition : null,
     tabs: tabs.filter(t => (isOverlay || t.id !== sender.tab?.id) && !t.url?.startsWith(chrome.runtime.getURL('')) && !/^(?:chrome|dia|arc):\/\/(?:newtab|new-tab-page)\/?(?:[?#].*)?$/.test(t.url || '') && toNavigableUrl(t.url || '')).sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0)).map(t => ({ id: t.id, windowId: t.windowId, title: t.title || t.url, url: t.url, pinned: t.pinned })),
     bookmarks: bookmarks.filter(b => b.url).slice(0, 80), history,
     shortcut: shortcuts.find(c => c.name === 'open-command-bar')?.shortcut || '',
@@ -164,7 +179,9 @@ async function execute(message, sender) {
   if (!item || typeof item.kind !== 'string') throw new Error('Choose a result first.');
   const overlay = new URL(sender.url).searchParams.get('mode') === 'overlay';
   const sourceId = sender.tab?.id;
-  const newTab = overlay || !!message.newTab || !sourceId;
+  const { settings: saved } = await chrome.storage.local.get('settings');
+  const settings = normalizeSettings(saved);
+  const newTab = overlay || !!message.newTab || settings.openIn === 'new' || !sourceId;
   const navigate = async url => {
     if (newTab) await chrome.tabs.create({ url, ...(sender.tab?.windowId ? { windowId: sender.tab.windowId } : {}) });
     else await chrome.tabs.update(sourceId, { url });
@@ -177,9 +194,8 @@ async function execute(message, sender) {
   } else if (item.kind === 'search') {
     const query = String(item.query || '').trim().slice(0, 2000);
     if (!query) throw new Error('Enter something to search for.');
-    const { settings } = await chrome.storage.local.get('settings');
-    const engine = settings?.engine || 'default';
-    if (ENGINES[engine]) await navigate(`${ENGINES[engine].url}${encodeURIComponent(query)}`);
+    const url = searchUrl(query, settings);
+    if (url) await navigate(url);
     else if (newTab) await chrome.search.query({ text: query, disposition: 'NEW_TAB' });
     else await chrome.search.query({ text: query, tabId: sourceId });
   } else if (['url', 'bookmark', 'history'].includes(item.kind)) {
@@ -194,6 +210,35 @@ async function execute(message, sender) {
   } else throw new Error('That result is not available.');
   if (overlay) await dismissOverlay(sourceId);
   return { done: true };
+}
+
+async function resetSettings() {
+  resettingPermissions = true;
+  autocomplete.cancelAll();
+  try {
+    // Disable opt-ins before revoking grants or announcing a settings change.
+    const settings = { ...DEFAULT_SETTINGS };
+    await chrome.storage.local.set({ settings });
+    await chrome.storage.session.remove('overlayPosition');
+    const optional = new Set(chrome.runtime.getManifest().optional_permissions || []);
+    const optionalGrants = granted => ({
+      permissions: (granted.permissions || []).filter(name => optional.has(name)),
+      // Every declared HTTP(S) host grant is optional. Include narrower grants
+      // made in the browser's site-access UI, not just our wildcard requests.
+      origins: (granted.origins || []).filter(origin => /^https?:\/\//.test(origin)),
+    });
+    const granted = optionalGrants(await chrome.permissions.getAll());
+    let failed = false;
+    if (granted.permissions.length || granted.origins.length) {
+      try { failed = !(await chrome.permissions.remove(granted)); }
+      catch { failed = true; }
+    }
+    const remaining = optionalGrants(await chrome.permissions.getAll());
+    if (failed || remaining.permissions.length || remaining.origins.length) {
+      throw new Error('Settings were reset, but some permissions could not be removed. Check permissions at chrome://extensions, then try Restore defaults again.');
+    }
+    return { settings };
+  } finally { resettingPermissions = false; }
 }
 
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
@@ -212,14 +257,28 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (message.type === 'cancel-autocomplete') { autocomplete.cancel(autocompleteClient(sender)); return {}; }
     if (message.type === 'execute') return execute(message, sender);
     if (message.type === 'dismiss') { autocomplete.cancel(autocompleteClient(sender)); await dismissOverlay(sender.tab?.id); return {}; }
-    if (message.type === 'settings') {
+    if (message.type === 'overlay-position') {
+      if (new URL(sender.url).searchParams.get('mode') !== 'overlay') throw new Error('An overlay is required.');
+      const { settings } = await chrome.storage.local.get('settings');
+      if (!settings?.rememberPos || message.position === null) { await chrome.storage.session.remove('overlayPosition'); return {}; }
+      const p = message.position;
+      if (!p || ![p.x, p.y].every(n => Number.isFinite(n) && n >= 0 && n <= 100000)) throw new Error('Invalid bar position.');
+      await chrome.storage.session.set({ overlayPosition: { x: p.x, y: p.y } });
+      return {};
+    }
+    if (message.type === 'settings' || message.type === 'reset-settings') {
       const save = settingsQueue.catch(() => {}).then(async () => {
-        const { settings = {} } = await chrome.storage.local.get('settings');
+        if (message.type === 'reset-settings') return resetSettings();
+        const { settings: previous } = await chrome.storage.local.get('settings');
+        const settings = normalizeSettings(previous);
         if (message.settings?.autocomplete === true && !(await chrome.permissions.contains({ origins: [AUTOCOMPLETE_ORIGIN] }))) throw new Error('Allow Google access before enabling query autocomplete.');
         if (message.settings?.newTabOverlay === true && !(await chrome.permissions.contains({ origins: OVERLAY_ORIGINS }))) throw new Error('Allow website access before enabling new tabs as an overlay.');
-        for (const [key, choices] of Object.entries(allowedSettings)) if (choices.includes(message.settings?.[key])) settings[key] = message.settings[key];
+        Object.assign(settings, settingsPatch(message.settings));
+        // Source toggles reflect real browser grants, not an editable flag.
+        for (const name of ['bookmarks', 'history']) settings[name] = await chrome.permissions.contains({ permissions: [name] });
+        if (!settings.rememberPos) await chrome.storage.session.remove('overlayPosition');
         await chrome.storage.local.set({ settings });
-        return { settings: { ...DEFAULT_SETTINGS, ...settings } };
+        return { settings };
       });
       settingsQueue = save;
       return save;

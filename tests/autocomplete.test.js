@@ -16,7 +16,8 @@ test('provider data is bounded and deduplicated; completions stay search actions
   const results = buildResults({ input: 'weather', engine: 'bing', suggestions: ['weather tomorrow', 'weather.com'] });
   assert.equal(results[0].id, 'search');
   assert.equal(results[1].query, 'weather tomorrow');
-  assert.equal(results[1].subtitle, 'Search Bing');
+  assert.equal(results[0].subtitle, 'with Bing');
+  assert.equal(results[1].subtitle, '');
   assert.equal(results[2].kind, 'search');
   assert.deepEqual(buildResults({ input: '@weather', suggestions: ['weather tomorrow'] }), []);
 });
