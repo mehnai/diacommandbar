@@ -1,6 +1,6 @@
 {
   "name": "dia-command-bar",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "private": true,
   "type": "module",
   "description": "An Arc-inspired new tab and command palette for Dia and Chromium browsers.",

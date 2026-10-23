@@ -15,7 +15,7 @@ const storage = data => ({
   remove: async key => { delete data[key]; },
 });
 
-async function setup({ permission = true, enabled = true, ready = true, duringOpen = () => {} } = {}) {
+async function setup({ permission = true, enabled = true, separate = true, ready = true, duringOpen = () => {} } = {}) {
   const source = { id: 1, windowId: 10, active: true, url: 'https://example.com/' };
   const placeholder = { id: 2, windowId: 10, active: true, url: 'chrome://newtab/' };
   const tabs = new Map([[1, source]]);
@@ -23,7 +23,7 @@ async function setup({ permission = true, enabled = true, ready = true, duringOp
   const calls = { open: [], dismiss: [], remove: [], update: [] };
   let clock = 1000;
   const browser = {
-    storage: { session: storage(session), local: storage({ settings: { newTabOverlay: enabled } }) },
+    storage: { session: storage(session), local: storage({ settings: { newTabOverlay: enabled, newTabPage: separate } }) },
     permissions: { contains: async () => permission },
     windows: { onRemoved: event() },
     tabs: {
@@ -34,46 +34,62 @@ async function setup({ permission = true, enabled = true, ready = true, duringOp
       remove: async id => { calls.remove.push(id); tabs.delete(id); },
     },
   };
-  const route = createNewTabRouter({ browser, pageUrl, now: () => clock,
+  createNewTabRouter({ browser, pageUrl, now: () => clock,
     openOverlay: async tab => { calls.open.push(tab.id); await duringOpen({ source, placeholder, tabs, browser }); return ready; },
     dismissOverlay: async id => { calls.dismiss.push(id); },
   });
-  await new Promise(resolve => setImmediate(resolve));
+  await flush();
   const create = (overrides = {}) => {
-    Object.assign(placeholder, overrides); tabs.set(2, placeholder); source.active = false;
+    Object.assign(placeholder, overrides); tabs.set(2, placeholder); source.active = !placeholder.active;
     browser.tabs.onCreated.emit({ ...placeholder });
-    browser.tabs.onActivated.emit({ tabId: 2, windowId: placeholder.windowId });
+    if (placeholder.active) browser.tabs.onActivated.emit({ tabId: 2, windowId: placeholder.windowId });
   };
-  const run = (overrides = {}) => route({ frameId: 0, url: pageUrl, tab: placeholder, ...overrides });
-  return { create, run, source, placeholder, calls, browser, tabs, advance: () => { clock += 11000; } };
+  return { create, source, placeholder, calls, browser, tabs, advance: () => { clock += 11000; } };
 }
 
 test('fresh new-tab handoff closes only the placeholder after readiness', async () => {
-  const h = await setup(); h.create();
-  assert.equal((await h.run()).routed, true);
+  const h = await setup(); h.create(); await flush();
   assert.deepEqual(h.calls, { open: [1], update: [1], remove: [2], dismiss: [] });
-  assert.equal((await h.run()).routed, false);
-  assert.deepEqual(h.calls.remove, [2]);
 });
 
-test('failed overlays, missing consent, old tabs, and explicit destinations are kept', async () => {
+test('separate page is optional for both Chromium and Dia; enabling it does not replace existing pages', async () => {
+  for (const url of ['chrome://newtab/', 'chrome://new-tab-page/', diaHome, `${diaHome}/`]) {
+    for (const separate of [true, false]) {
+      const h = await setup({ enabled: false, separate }); h.create({ url }); await flush();
+      assert.equal(h.placeholder.url, separate ? pageUrl : url);
+      assert.deepEqual(h.calls.update, separate ? [2] : []);
+      assert.deepEqual(h.calls.remove, []);
+      await h.browser.storage.local.set({ settings: { newTabPage: true } });
+      h.browser.tabs.onActivated.emit({ tabId: 2, windowId: 10 }); await flush();
+      assert.equal(h.placeholder.url, separate ? pageUrl : url);
+    }
+  }
+});
+
+test('overlay works with the separate page disabled, and failures keep the native home', async () => {
+  const h = await setup({ separate: false }); h.create({ url: diaHome }); await flush();
+  assert.deepEqual(h.calls, { open: [1], update: [1], remove: [2], dismiss: [] });
   for (const options of [{ ready: false }, { permission: false }, { enabled: false }]) {
-    const h = await setup(options); h.create();
-    assert.equal((await h.run()).routed, false);
-    assert.deepEqual(h.calls.remove, []);
+    for (const separate of [true, false]) {
+      const h = await setup({ ...options, separate }); h.create(); await flush();
+      assert.deepEqual(h.calls.remove, []);
+      assert.equal(h.placeholder.url, separate ? pageUrl : 'chrome://newtab/');
+    }
   }
-  for (const overrides of [{ active: false }, { discarded: true }, { url: pageUrl }, { pendingUrl: 'https://example.net/' }]) {
-    const h = await setup(); h.create(overrides);
-    assert.equal((await h.run()).routed, false);
-    assert.deepEqual(h.calls.open, []);
-  }
-  const old = await setup(); old.create(); old.advance();
-  assert.equal((await old.run()).routed, false);
-  const existing = await setup();
-  assert.equal((await existing.run()).routed, false);
 });
 
-test('user navigation, tab switching, source navigation, and closed tabs abort the handoff', async () => {
+test('explicit destinations, inactive Chromium tabs, and pinned or restored tabs are kept', async () => {
+  for (const overrides of [
+    { active: false }, { discarded: true }, { pinned: true }, { url: pageUrl },
+    { pendingUrl: 'https://example.net/' }, { url: `${pageUrl}?source=shortcut` },
+    { openerTabId: 1, url: 'https://example.net/' },
+  ]) {
+    const h = await setup(); h.create(overrides); await flush();
+    assert.deepEqual(h.calls.open, []); assert.deepEqual(h.calls.update, []); assert.deepEqual(h.calls.remove, []);
+  }
+});
+
+test('user navigation, switching, source navigation, and closed tabs abort the handoff', async () => {
   for (const duringOpen of [
     ({ placeholder }) => { placeholder.pendingUrl = 'https://work.example/'; },
     ({ placeholder }) => { placeholder.url = 'https://work.example/'; },
@@ -83,130 +99,70 @@ test('user navigation, tab switching, source navigation, and closed tabs abort t
     ({ tabs }) => { tabs.delete(2); },
     ({ browser }) => browser.storage.local.set({ settings: { newTabOverlay: false } }),
   ]) {
-    const h = await setup({ duringOpen }); h.create();
-    assert.equal((await h.run()).routed, false);
-    assert.deepEqual(h.calls.remove, []);
-    assert.deepEqual(h.calls.update, []);
-    assert.deepEqual(h.calls.dismiss, [1]);
+    const h = await setup({ duringOpen }); h.create(); await flush();
+    assert.deepEqual(h.calls.remove, []); assert.deepEqual(h.calls.update, []); assert.deepEqual(h.calls.dismiss, [1]);
   }
 });
 
-test('restricted sources, new windows, embedded senders, and shortcut fallbacks never reroute', async () => {
-  const restricted = await setup(); restricted.source.url = 'chrome://settings/'; restricted.create();
-  assert.equal((await restricted.run()).routed, false);
-  assert.deepEqual(restricted.calls.open, []);
-  const window = await setup(); window.create({ windowId: 11 });
-  assert.equal((await window.run()).routed, false);
-  for (const sender of [{ frameId: 1 }, { url: `${pageUrl}?source=shortcut` }]) {
-    const h = await setup(); h.create();
-    assert.equal((await h.run(sender)).routed, false);
-    assert.deepEqual(h.calls.open, []);
+test('restricted sources and new windows respect the separate-page fallback choice', async () => {
+  for (const separate of [true, false]) {
+    for (const newWindow of [true, false]) {
+      const h = await setup({ separate }); h.source.url = 'chrome://settings/';
+      h.create({ windowId: newWindow ? 11 : 10, url: diaHome }); await flush();
+      assert.equal(h.placeholder.url, separate ? pageUrl : diaHome);
+      assert.deepEqual(h.calls.open, []); assert.deepEqual(h.calls.remove, []);
+    }
   }
 });
 
-test('Dia home redirects the same fresh tab, including when its URL arrives after creation', async () => {
-  for (const initial of ['', diaHome]) {
-    const h = await setup({ enabled: false });
-    h.create({ url: initial });
-    h.placeholder.url = diaHome;
-    h.browser.tabs.onUpdated.emit(2, { url: diaHome });
-    await flush();
-    assert.equal(h.placeholder.url, pageUrl);
-    assert.deepEqual(h.calls.update, [2]);
-    assert.deepEqual(h.calls.remove, []);
-    assert.equal((await h.run()).routed, false);
-  }
+test('Dia homepage is recognized when its URL arrives after creation', async () => {
+  const h = await setup({ enabled: false }); h.create({ url: '' });
+  h.placeholder.url = diaHome; h.browser.tabs.onUpdated.emit(2, { url: diaHome }); await flush();
+  assert.equal(h.placeholder.url, pageUrl); assert.deepEqual(h.calls.update, [2]);
 });
 
-test('Dia redirect keeps the existing optional overlay handoff', async () => {
-  const h = await setup(); h.create({ url: diaHome });
-  await flush();
-  assert.equal(h.placeholder.url, pageUrl);
-  assert.equal((await h.run()).routed, true);
-  assert.deepEqual(h.calls, { open: [1], update: [2, 1], remove: [2], dismiss: [] });
-});
-
-test('Dia home in a new window becomes a command page without closing a tab', async () => {
-  const h = await setup(); h.create({ windowId: 11, url: 'chrome://start-page/' });
-  await flush();
-  assert.equal(h.placeholder.url, pageUrl);
-  assert.equal((await h.run()).routed, false);
-  assert.deepEqual(h.calls.update, [2]);
-  assert.deepEqual(h.calls.remove, []);
-});
-
-test('Dia redirect ignores existing pages, expired candidates, and explicit destinations', async () => {
+test('Dia routing ignores existing pages, expired candidates, chat paths, and explicit destinations', async () => {
   for (const overrides of [
-    { url: diaHome, active: false }, { url: diaHome, pinned: true },
-    { url: diaHome, discarded: true },
-    { url: diaHome, pendingUrl: 'https://example.net/' },
-    { url: `${diaHome}/chat` }, { url: `${diaHome}?conversation=existing` },
-    { url: 'https://start-page.example/' }, { url: 'https://example.net/' },
+    { url: diaHome, active: false }, { url: diaHome, pinned: true }, { url: diaHome, discarded: true },
+    { url: diaHome, pendingUrl: 'https://example.net/' }, { url: `${diaHome}/chat` },
+    { url: `${diaHome}?conversation=existing` }, { url: 'https://start-page.example/' }, { url: 'https://example.net/' },
   ]) {
-    const h = await setup(); h.create(overrides);
-    h.browser.tabs.onUpdated.emit(2, { url: diaHome });
-    await flush();
-    assert.deepEqual(h.calls.update, []);
+    const h = await setup(); h.create(overrides); h.browser.tabs.onUpdated.emit(2, { url: diaHome }); await flush();
+    assert.deepEqual(h.calls.update, []); assert.deepEqual(h.calls.open, []);
   }
-  const existing = await setup();
-  existing.source.url = diaHome;
-  existing.browser.tabs.onUpdated.emit(1, { url: diaHome });
-  await flush();
-  assert.deepEqual(existing.calls.update, []);
+  const existing = await setup(); existing.source.url = diaHome;
+  existing.browser.tabs.onUpdated.emit(1, { url: diaHome }); await flush(); assert.deepEqual(existing.calls.update, []);
   const expired = await setup(); expired.create({ url: '' }); expired.advance();
-  expired.placeholder.url = diaHome;
-  expired.browser.tabs.onUpdated.emit(2, { url: diaHome });
-  await flush();
+  expired.placeholder.url = diaHome; expired.browser.tabs.onUpdated.emit(2, { url: diaHome }); await flush();
   assert.deepEqual(expired.calls.update, []);
 });
 
-test('Dia redirect does not replace a link that initially had an empty URL', async () => {
+test('a link with an initially empty URL cannot later become a new-tab candidate', async () => {
   const h = await setup(); h.create({ url: '', active: false, openerTabId: 1 });
-  h.placeholder.url = 'https://example.net/';
-  h.browser.tabs.onUpdated.emit(2, { url: h.placeholder.url });
-  await flush();
-  // Navigating that existing tab to the start page later must not redirect it.
-  h.placeholder.url = diaHome;
-  h.browser.tabs.onUpdated.emit(2, { url: diaHome });
-  await flush();
+  h.placeholder.url = 'https://example.net/'; h.browser.tabs.onUpdated.emit(2, { url: h.placeholder.url }); await flush();
+  h.placeholder.url = diaHome; h.placeholder.active = true; h.browser.tabs.onUpdated.emit(2, { url: diaHome }); await flush();
   assert.deepEqual(h.calls.update, []);
 });
 
-test('Dia inactive placeholders with an opener redirect only after a confirmed homepage and activation', async () => {
+test('Dia placeholders with an opener wait for both the homepage URL and activation', async () => {
   for (const activationFirst of [true, false]) {
-    const h = await setup(); h.create({ url: '', active: false, openerTabId: 1 });
-    await flush();
+    const h = await setup(); h.create({ url: '', active: false, openerTabId: 1 }); await flush();
     assert.deepEqual(h.calls.update, []);
-    const activate = () => {
-      h.placeholder.active = true;
-      h.browser.tabs.onActivated.emit({ tabId: 2, windowId: 10 });
-    };
+    const activate = () => { h.placeholder.active = true; h.browser.tabs.onActivated.emit({ tabId: 2, windowId: 10 }); };
     if (activationFirst) { activate(); await flush(); }
-    h.placeholder.url = diaHome;
-    h.browser.tabs.onUpdated.emit(2, { url: diaHome });
-    await flush();
-    if (!activationFirst) {
-      assert.deepEqual(h.calls.update, []);
-      activate(); await flush();
-    }
-    assert.equal(h.placeholder.url, pageUrl);
-    assert.deepEqual(h.calls.update, [2]);
-    assert.equal((await h.run()).routed, true);
+    h.placeholder.url = diaHome; h.browser.tabs.onUpdated.emit(2, { url: diaHome }); await flush();
+    if (!activationFirst) { assert.deepEqual(h.calls.update, []); activate(); await flush(); }
+    assert.deepEqual(h.calls, { open: [1], update: [1], remove: [2], dismiss: [] });
   }
 });
 
-test('Dia redirect rechecks navigation, selection, and tab existence before updating', async () => {
+test('routing rechecks navigation, selection, and tab existence before updating', async () => {
   for (const change of [
-    h => { h.placeholder.pendingUrl = 'https://work.example/'; },
-    h => { h.placeholder.active = false; },
-    h => { h.placeholder.windowId = 11; },
-    h => { h.tabs.delete(2); },
+    h => { h.placeholder.pendingUrl = 'https://work.example/'; }, h => { h.placeholder.active = false; },
+    h => { h.placeholder.windowId = 11; }, h => { h.tabs.delete(2); },
   ]) {
-    const h = await setup(); h.create({ url: '' });
-    h.placeholder.url = diaHome;
-    h.browser.tabs.onUpdated.emit(2, { url: diaHome });
-    change(h);
-    await flush();
+    const h = await setup(); h.create({ url: '' }); h.placeholder.url = diaHome;
+    h.browser.tabs.onUpdated.emit(2, { url: diaHome }); change(h); await flush();
     assert.deepEqual(h.calls.update, []);
   }
 });

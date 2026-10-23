@@ -126,3 +126,120 @@ test('light, dark, narrow and settings visual captures; every section stays usab
   await page.screenshot({ path: 'test-results/settings-mobile.png', animations: 'disabled' });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
+
+test('each font changes the rendered bar, settings, footer and keys, and survives reopening', async ({ page }) => {
+  await page.goto('/');
+  const session = await page.context().newCDPSession(page);
+  await session.send('DOM.enable'); await session.send('CSS.enable');
+  const rendered = new Set();
+  for (const [name, family] of [['Dia', /ABC Oracle/], ['Serif', /Iowan Old Style/], ['Mono', /monospace/]]) {
+    await page.locator('.footer-settings').click();
+    await choose(page, 'Appearance', 'Font', name);
+    for (const selector of ['#query', '.result-title', '.palette-footer', 'kbd', '#settings-title', '.text-choice']) {
+      await expect(page.locator(selector).first()).toHaveCSS('font-family', family);
+    }
+    await page.getByRole('button', { name: 'Close settings' }).click();
+    const { root } = await session.send('DOM.getDocument');
+    const { nodeId } = await session.send('DOM.querySelector', { nodeId: root.nodeId, selector: '.result-title' });
+    const { fonts } = await session.send('CSS.getPlatformFontsForNode', { nodeId });
+    rendered.add(fonts.map(font => font.familyName).join(', '));
+    await page.screenshot({ path: `test-results/font-${name.toLowerCase()}.png` });
+    await page.reload();
+    await expect(page.locator('#query')).toHaveCSS('font-family', family);
+    await page.locator('.footer-settings').click();
+    await section(page, 'Appearance');
+    await expect(page.getByRole('group', { name: 'Font', exact: true }).getByRole('button', { name, exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await page.getByRole('button', { name: 'Close settings' }).click();
+  }
+  expect(rendered.size).toBe(3);
+  await session.detach();
+});
+
+test('appearance choices change actual colors, spacing, size, contrast, and highlight', async ({ page }) => {
+  await page.goto('/');
+  await page.locator('.footer-settings').click();
+  for (const theme of ['Light', 'Dark']) {
+    await choose(page, 'Appearance', 'Theme', theme);
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme.toLowerCase());
+  }
+  await choose(page, 'Appearance', 'Theme', 'Match system');
+  for (const colorScheme of ['light', 'dark']) {
+    await page.emulateMedia({ colorScheme });
+    await expect(page.locator('html')).toHaveAttribute('data-theme', colorScheme);
+  }
+  const accents = new Set();
+  for (const name of ['None', 'Blue', 'Green', 'Orange', 'Red']) {
+    await choose(page, 'Appearance', 'Accent color', name);
+    accents.add(await page.locator('.result.selected').evaluate(el => getComputedStyle(el).backgroundColor));
+  }
+  expect(accents.size).toBe(5);
+  for (const [label, padding] of [['Compact', '6px'], ['Comfortable', '8px'], ['Spacious', '11px']]) {
+    await choose(page, 'Appearance', 'Spacing', label);
+    await expect(page.locator('.result').first()).toHaveCSS('padding-top', padding);
+  }
+  const contrast = await page.locator('.palette').evaluate(el => getComputedStyle(el).borderTopColor);
+  await choose(page, 'Appearance', 'Contrast', 'Higher');
+  expect(await page.locator('.palette').evaluate(el => getComputedStyle(el).borderTopColor)).not.toBe(contrast);
+  await choose(page, 'Appearance', 'Contrast', 'Normal');
+  await expect(page.locator('.palette')).toHaveCSS('border-top-color', contrast);
+  for (const [name, count, selector, css, value] of [
+    ['Increase roundness', 5, '.palette', 'border-radius', '24px'],
+    ['Decrease roundness', 12, '.palette', 'border-radius', '0px'],
+    ['Increase bar width', 10, '.stage', 'width', '820px'],
+    ['Decrease bar width', 15, '.stage', 'width', '520px'],
+  ]) {
+    for (let i = 0; i < count; i++) await page.getByRole('button', { name, exact: true }).click();
+    await expect(page.locator(selector)).toHaveCSS(css, value);
+    await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
+  }
+  await choose(page, 'Command bar', 'Highlight', 'Soft');
+  const soft = await page.locator('.result.selected').evaluate(el => getComputedStyle(el).backgroundColor);
+  await choose(page, 'Command bar', 'Highlight', 'Inverted');
+  expect(await page.locator('.result.selected').evaluate(el => getComputedStyle(el).backgroundColor)).not.toBe(soft);
+});
+
+test('new-tab presentation, toggles, result count and every starting scope affect visible behavior', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-10-22T15:30:00') });
+  await page.goto('/');
+  await page.locator('.footer-settings').click();
+  await choose(page, 'New tab', 'Time format', '3:30 PM');
+  await expect(page.locator('#time')).toContainText('3:30');
+  await choose(page, 'New tab', 'Time format', '15:30');
+  await expect(page.locator('#time')).toHaveText('15:30');
+  await page.clock.fastForward(60000); await expect(page.locator('#time')).toHaveText('15:31');
+  for (const [label, onValue, offValue, selector, css, expected] of [
+    ['Bar position', 'Higher up', 'Middle', '.stage', 'top', '120px'],
+    ['Background', 'Dot grid', 'Plain', 'body', 'background-image', /radial-gradient/],
+  ]) {
+    await choose(page, 'New tab', label, onValue);
+    await expect(page.locator(selector)).toHaveCSS(css, expected);
+    await choose(page, 'New tab', label, offValue);
+    await expect(page.locator(selector)).not.toHaveCSS(css, expected);
+  }
+  for (const [tab, label, selector] of [
+    ['New tab', 'Show date and time', '.clock'],
+    ['Command bar', 'Show filter buttons', '.filter-row'],
+    ['Command bar', 'Show icons', '.result-icon'],
+    ['Command bar', 'Label each result', '.result-kind'],
+    ['Command bar', 'Show keyboard hints', '.palette-footer'],
+    ['Command bar', 'Show number shortcuts', '.result-number'],
+  ]) {
+    await choose(page, tab, label, 'Off'); await expect(page.locator(selector).first()).toBeHidden();
+    await choose(page, tab, label, 'On'); await expect(page.locator(selector).first()).toBeVisible();
+  }
+  for (const [label, scope] of [['Everything', 'all'], ['Open tabs', 'tabs'], ['Bookmarks', 'bookmarks'], ['History', 'history'], ['Actions', 'actions']]) {
+    await choose(page, 'Sources', 'Start by searching', label);
+    await page.getByRole('button', { name: 'Close settings' }).click();
+    await expect(page.locator(`[data-filter=${scope}]`)).toHaveAttribute('aria-pressed', 'true');
+    await page.getByRole('combobox').fill('> downloads'); await page.getByRole('combobox').press('Escape');
+    await expect(page.locator(`[data-filter=${scope}]`)).toHaveAttribute('aria-pressed', 'true');
+    await page.locator('.footer-settings').click();
+  }
+  await section(page, 'Search');
+  for (let i = 0; i < 3; i++) await page.getByRole('button', { name: 'Decrease how many results' }).click();
+  await expect(page.locator('.result')).toHaveCount(3);
+  await expect(page.getByRole('button', { name: 'Decrease how many results' })).toBeDisabled();
+  for (let i = 0; i < 7; i++) await page.getByRole('button', { name: 'Increase how many results' }).click();
+  await expect(page.locator('.result')).toHaveCount(7);
+  await expect(page.getByRole('button', { name: 'Increase how many results' })).toBeDisabled();
+});

@@ -1,6 +1,6 @@
 # Dia Command Bar
 
-A lightweight, Arc-inspired command bar for Dia and other Chromium browsers. It replaces the standard Chromium new tab page and opens as an overlay on websites with **⌘⇧L** on Mac or **Ctrl+Shift+L** on Windows/Linux. An optional setting also turns **⌘T / Ctrl+T** into an overlay over your previous website.
+A lightweight, Arc-inspired command bar for Dia and other Chromium browsers. It can show a separate command page for new tabs and opens as an overlay on websites with **⌘⇧L** on Mac or **Ctrl+Shift+L** on Windows/Linux. An optional setting also turns **⌘T / Ctrl+T** into an overlay over your previous website.
 
 ## Install in Dia
 
@@ -15,13 +15,20 @@ There is no build step and no account to set up. Keep the installed folder in pl
 
 ### Dia and the new tab shortcut
 
-By default, **⌘T / Ctrl+T** opens the full command page. Enable **Settings → Overlay → Open new tabs as an overlay** to open the command bar over the previous website instead. The option is off by default and requests optional HTTP/HTTPS website access: the new-tab shortcut does not grant the extension temporary access to the previous page.
+Open **Settings → New tab → Use a separate command page** to choose whether fresh tabs show the extension's page or your browser's own homepage. It starts **On** to preserve the existing behavior. Choosing **Off** takes effect for the next new tab, leaves existing tabs alone, and keeps the toolbar icon and extension shortcut available.
 
-The browser still creates a new tab first. When that fresh, empty tab loads the extension, it opens an overlay on the previous tab in the same window, waits for the overlay to respond, switches back, and closes only the temporary new tab. A brief tab flash is possible. Existing command pages, background tabs, explicit destinations, and tabs where navigation has started are kept. If there is no previous website, or the page cannot show the overlay, the full command page stays available. Turning the option off removes its broad website permission. Chromium may also remove a Google grant covered by that permission; if so, settings explains that you need to enable search suggestions again.
+**Settings → Overlay → Open new tabs as an overlay** is an independent choice. It starts **Off** and requests optional HTTP/HTTPS website access when enabled. The browser's reserved **⌘T / Ctrl+T** shortcut does not grant temporary access to the previous website.
 
-This uses the standard `chrome_url_overrides.newtab` override; it cannot reassign the browser's reserved shortcut. Dia also has a separate `chrome://start-page/<UUID>` homepage that bypasses this override. For a newly created foreground tab, the extension recognizes that address and navigates the same tab to its command page. With **Open new tabs as an overlay** enabled, the normal handoff to your previous website can then run. Otherwise, or in a new window with no previous website, the command page stays open. Dia's native page may briefly appear before the redirect.
+| Separate command page | New-tab overlay | What a fresh tab does |
+| --- | --- | --- |
+| On | Off | Opens the separate command page. |
+| Off | Off | Keeps Dia's own homepage (or Chromium's native new-tab page). |
+| On | On | Opens an overlay over the previous website; falls back to the command page when an overlay is unavailable. |
+| Off | On | Opens an overlay over the previous website; keeps the native homepage when an overlay is unavailable. |
 
-The Dia workaround only considers tabs created within the last ten seconds, and waits for the actual homepage address rather than treating an empty URL as a homepage. Dia initially reports its new homepage as an inactive tab with an opener; the extension waits for it to become active before redirecting. It ignores pre-existing tabs, pinned/discarded tabs, deeper chat paths, and pages with query strings. A tab that starts navigating to another destination is no longer a candidate. This uses existing permissions and adds no dependencies. Dia's undocumented internal address can change between browser versions.
+The browser still creates a new tab first. When overlay mode is available, the extension waits for the bar to respond, switches back to the previous website in the same window, and closes only the temporary tab. A brief tab flash is possible. Existing pages, explicit destinations, and tabs where navigation has started are kept. Turning overlay mode off removes its broad website permission. Chromium may also remove a Google grant covered by that permission; if so, settings explains how to renew search suggestions.
+
+The extension observes fresh native tabs instead of using an unconditional manifest new-tab override, so choosing the browser homepage works without disabling the extension or redirecting it in a loop. Dia's `chrome://start-page/<UUID>` homepage and Chromium's native new-tab addresses are recognized. A candidate must be less than ten seconds old, active, unpinned, and not discarded. Dia's initially inactive placeholders wait for both activation and a confirmed homepage address. Existing tabs, deeper chat paths, query strings, and tabs already navigating elsewhere are left alone. New windows follow the separate-page choice because they have no previous website. Dia's undocumented internal address can change between browser versions.
 
 Use **⌘⇧L** or the toolbar icon for the Arc-style overlay. On internal browser pages, the Chrome Web Store, or pages that block embedding, it opens a separate command tab. Invoking it on an existing command page focuses that page's search field and preserves your query, without opening another tab or requesting host access. Customize the shortcut at `chrome://extensions/shortcuts`; some browser and system shortcuts cannot be reassigned. When a new tab opens, the browser may keep keyboard focus in its address bar. Click the command field or use the extension shortcut to focus it.
 
@@ -42,7 +49,7 @@ Use **⌘⇧L** or the toolbar icon for the Arc-style overlay. On internal brows
 | `Esc` | Clear the search; press again to dismiss an overlay |
 | `⌘,` / `Ctrl+,` | Open settings |
 
-The overlay opens destinations in a new tab so your current page stays available. Selecting an open tab switches to it. Selecting a destination from the full new-tab page uses that tab, unless you hold Command/Control or choose **Settings → Search → Open results in → A new tab**. New-tab overlay mode closes only the empty tab it just received; your existing tabs stay open.
+**Settings → Search → Open results in** applies to both the separate page and the overlay. **Automatic** (the default) preserves the website by using a new tab from overlays, and reuses the separate command page. **This tab** replaces the current website when used in an overlay. **A new tab** always creates a new tab. Holding Command/Control with Enter also forces a new tab. Selecting an existing tab switches to it regardless of this preference. New-tab overlay mode closes only the empty tab it just received; your existing tabs stay open.
 
 The overlay background is transparent, with no page dimming or blur. Its embedded page is clipped to the visible controls so an opaque browser canvas cannot hide the surrounding website. Drag the small grip at the top to move the bar; double-click it to center the bar again. You can also focus the grip with Shift+Tab from the search field, move it with the arrow keys (Shift for larger steps), and press Home to center it. The bar stays within the window when results grow or the window resizes, and starts centered unless **Settings → Overlay → Remember where I moved it** is on. Remembered positions last for the browser session; double-click or Home clears the saved position. Outside-click dismissal can also be turned off. Dragging uses native pointer events with no added dependencies or permissions.
 
@@ -52,13 +59,56 @@ Open **Settings** in the bar footer, press **⌘, / Ctrl+,**, or type **> settin
 
 - **Appearance:** system/light/dark, monochrome or blue/green/orange/red accents, UI/serif/mono font, spacing, roundness, width, and higher contrast.
 - **Command bar:** inverted or soft selection, filters, icons, result labels, number labels, and keyboard hints. Hiding hints keeps the settings shortcut and action available.
-- **New tab:** live date/time, 12/24-hour format, position, and plain or dot-grid background.
-- **Search:** default/Google/DuckDuckGo/Bing/Brave/custom engine, optional Google suggestions, 3–10 local results, and where destinations open. Custom addresses must use HTTPS, contain `%s` for the encoded query, and have no credentials.
+- **New tab:** separate command page on/off, live date/time, 12/24-hour format, position, and plain or dot-grid background. These appearance settings affect the separate page; overlays remain transparent and have no clock.
+- **Search:** default/Google/DuckDuckGo/Bing/Brave/custom engine, optional Google suggestions, 3–10 results in total (including the direct action and suggestions), and where destinations open. Custom addresses must use HTTPS, contain `%s` for the encoded query, and have no credentials.
 - **Sources:** default scope, current/all windows, optional bookmarks/history, and a 7/30/90-day history range. Clear/Escape resets to the default scope.
 - **Overlay:** new-tab handoff, outside-click dismissal, and remembered position.
 - **Shortcuts:** actual browser binding, palette keys, and a link to browser shortcut settings.
 
-Preferences stay in this browser profile. The old lilac/sage/rose/sand accents migrate to monochrome; existing search, theme, and overlay preferences are retained. **Restore defaults** resets customization, turns off autocomplete and new-tab overlays, clears remembered position, and revokes all optional bookmark, history, Google, and HTTP/HTTPS site grants (including individual-site grants). It cancels pending suggestions and verifies that the grants were removed. If the browser refuses, it reports the failure rather than claiming success. Features require enabling and granting access again. Existing HTTP custom search templates are rejected; replace them with an HTTPS template in Settings → Search.
+Font changes apply to the input, results, settings, footer, and shortcut labels. **Dia** uses ABC Oracle when installed, then the system UI font; **Serif** and **Mono** use installed serif and monospace fonts. The clock deliberately keeps its display font. No font files are bundled or downloaded.
+
+Preferences stay in this browser profile. The old lilac/sage/rose/sand accents migrate to monochrome; existing search, theme, and overlay preferences are retained. The older “This tab” value migrates to **Automatic**, preserving its previous behavior; select **This tab** again to explicitly replace the website beneath an overlay. **Restore defaults** resets customization, turns the separate command page back on, turns off autocomplete and new-tab overlays, clears remembered position, and revokes all optional bookmark, history, Google, and HTTP/HTTPS site grants (including individual-site grants). It cancels pending suggestions and verifies that the grants were removed. If the browser refuses, it reports the failure rather than claiming success. Features require enabling and granting access again. Existing HTTP custom search templates are rejected; replace them with an HTTPS template in Settings → Search.
+
+### Arc-style preset: exact settings to select
+
+Use the following selections for the closest supported Arc-style workflow: **⌘T** opens a command bar over the current website, and submitting a new destination opens a tab. Arc documents its [Command-T command bar](https://start.arc.net/master-multitasking) and [command actions](https://start.arc.net/command-bar-actions). The visual choices below are an approximation using this extension's controls; Arc's themes, native fonts, Spaces, and ranking are not reproduced exactly.
+
+| Section | Setting | Select |
+| --- | --- | --- |
+| New tab | Use a separate command page | **Off** |
+| Overlay | Open new tabs as an overlay | **On** — allow website access |
+| Overlay | Close when I click outside | **On** |
+| Overlay | Remember where I moved it | **Off** |
+| Appearance | Theme | **Match system** |
+| Appearance | Accent color | **Blue** |
+| Appearance | Font | **Dia** |
+| Appearance | Spacing | **Comfortable** |
+| Appearance | Roundness | **14px** |
+| Appearance | Bar width | **620px** |
+| Appearance | Contrast | **Normal** |
+| Command bar | Highlight | **Soft** |
+| Command bar | Show filter buttons | **Off** |
+| Command bar | Show icons | **On** |
+| Command bar | Label each result | **On** |
+| Command bar | Show number shortcuts | **Off** |
+| Command bar | Show keyboard hints | **Off** |
+| Search | Search with | **Browser default** — set Dia's default to the engine you used in Arc |
+| Search | Suggest searches as I type | **On** — allow Google access |
+| Search | How many results | **6 results** |
+| Search | Open results in | **A new tab** |
+| Sources | Start by searching | **Everything** |
+| Sources | Include tabs from other windows | **Off** |
+| Sources | Search my bookmarks | **On** — allow bookmark access |
+| Sources | Search my history | **On** — allow history access |
+| Sources | Look back | **3 months** |
+| New tab | Show date and time | **Off** |
+| New tab | Time format | **3:30 PM** (unused while the clock is off) |
+| New tab | Bar position | **Middle** (separate page only) |
+| New tab | Background | **Plain** (separate page only) |
+
+Keep **⌘⇧L** as the extension's secondary shortcut. Do not try to assign **⌘T** in the browser shortcut editor: overlay mode handles fresh tabs created by that reserved shortcut. With keyboard hints hidden, open settings using **⌘,** or type **> settings**. New windows and restricted pages retain Dia's homepage; explicitly invoking the extension there can still open its command page because browser-internal pages cannot host the overlay.
+
+This preset asks for optional access so local bookmark/history matches and automatic overlays work. Enabling suggestions sends eligible partial searches to Google, regardless of the search engine you select. Leave suggestions **Off** if you prefer to keep unfinished queries local. Apply the choices manually; the preset does not change your settings just by being documented.
 
 ### Optional query autocomplete
 
@@ -82,7 +132,7 @@ There are no runtime dependencies, remote scripts, remote fonts, or analytics. A
 - Optional `https://suggestqueries.google.com/*` host access: requested for query autocomplete. The browser's permission prompt covers the host, even though the extension only fetches its autocomplete endpoint.
 - Optional `http://*/*` and `https://*/*` host access: requested only when you enable **Open new tabs as an overlay**, to draw over the previous website without an extension-button gesture. It does not enable autocomplete or send page contents anywhere. Disabling this option removes the broad grants and can require renewing Google autocomplete access.
 
-The embedded command page verifies its extension origin and a per-tab token before accepting privileged operations. Window messages carry only control bounds and outside-click dismissal; external websites cannot issue browser commands through them. Website text is rendered as text, never HTML. Executable URLs and URLs containing credentials are rejected.
+The embedded command page verifies its extension origin and a per-tab token before accepting privileged operations. Window messages carry only control bounds and UI dismissal; external websites cannot issue browser commands through them. Website text is rendered as text, never HTML. Executable URLs and URLs containing credentials are rejected.
 
 ## Develop and verify
 
@@ -99,9 +149,9 @@ npm run package
 
 The preview is at `http://127.0.0.1:4173`. It uses sample tabs and does not perform real browser actions; its browser title identifies it as a design preview. The installed extension uses real data and never shows the sample tabs.
 
-Browser tests load the real extension into an isolated Chromium profile and cover the new-tab override and overlay handoff, tab switching, navigation, settings, overlay lifecycle, restricted-page fallback, authorization boundaries, and autocomplete/website permission interactions. Optional hosts are pre-granted through Chromium's extension-management API because the headless driver cannot accept native permission dialogs; the actual toggles, permission checks, revocation, and network path are exercised. Unit tests cover handoff races, stale placeholders, and explicit destinations. Provider responses are deterministic; tests also cover stale requests, source filters, malformed responses, and network failures. Preview tests cover keyboard use and narrow layouts. Visual captures are written to `test-results/`.
+Browser tests load the real extension into an isolated Chromium profile and cover the optional native/command new-tab routing and overlay handoff, tab switching, navigation, settings, overlay lifecycle, restricted-page fallback, authorization boundaries, and autocomplete/website permission interactions. Optional hosts are pre-granted through Chromium's extension-management API because the headless driver cannot accept native permission dialogs; the actual toggles, permission checks, revocation, and network path are exercised. Bookmark/history permission dialogs use a simulated grant fixture; host permission revocation runs through the real browser API. Security regression checks verify CSP enforcement in pages and the worker, HTTPS custom-search validation (including retained legacy settings), reset cancellation and failed-revocation feedback, individual-site grant removal, and cleanup of overlays after permission removal. Unit tests cover handoff races, stale placeholders, and explicit destinations. Provider responses are deterministic; tests also cover stale requests, source filters, malformed responses, and network failures. Settings checks exercise rendered fonts (including actual platform font selection), every appearance control, presentation toggles, clock updates, starting scopes, result limits, destination behavior in overlays, all built-in search providers, and shortcut settings. Preview tests cover keyboard use and narrow layouts. Dia-specific homepage events use deterministic unit fixtures; the real browser integration tests run in Chromium. Visual captures are written to `test-results/`.
 
-`npm run package` produces a clean unpacked folder and `dist/dia-command-bar-1.3.1.zip`. Load the folder into the browser; unzip the archive before loading it. The ZIP is suitable for sharing or preparing a store submission, but has not been published or reviewed by a browser store.
+`npm run package` produces a clean unpacked folder and `dist/dia-command-bar-1.4.0.zip`. Load the folder into the browser; unzip the archive before loading it. The ZIP is suitable for sharing or preparing a store submission, but has not been published or reviewed by a browser store.
 
 ## Platform references
 

@@ -42,7 +42,7 @@ async function trigger(page) {
   await page.bringToFront();
   const browserSession = await context.browser().newBrowserCDPSession();
   const { targetInfos } = await browserSession.send('Target.getTargets', { filter: [{ type: 'tab', exclude: false }] });
-  const target = targetInfos.find(info => info.url === page.url()) || targetInfos.find(info => info.embedderData?.tabActive && info.url === 'chrome://newtab/' && page.url() === `chrome-extension://${extensionId}/newtab.html`);
+  const target = targetInfos.find(info => info.url === page.url()) || targetInfos.find(info => info.embedderData?.tabActive && info.url === 'chrome://newtab/' && [`chrome-extension://${extensionId}/newtab.html`, 'chrome://new-tab-page/'].includes(page.url()));
   if (!target) throw new Error(`No tab target for ${page.url()}: ${JSON.stringify(targetInfos)}`);
   await browserSession.send('Extensions.triggerAction', { id: extensionId, targetId: target.targetId });
   await browserSession.detach();
@@ -82,7 +82,7 @@ async function grantSourceFixtures(names) {
     const getAll = chrome.permissions.getAll.bind(chrome.permissions);
     const remove = chrome.permissions.remove.bind(chrome.permissions);
     const sourceNames = ['bookmarks', 'history'];
-    const granted = new Set(names);
+    const granted = globalThis.sourceGrants = new Set(names);
     globalThis.removedSourceGrants = [];
     chrome.permissions.contains = options => {
       if ((options.permissions || []).some(name => sourceNames.includes(name) && !granted.has(name))) return Promise.resolve(false);
@@ -99,7 +99,8 @@ async function grantSourceFixtures(names) {
       const permissions = (options.permissions || []).filter(name => !sourceNames.includes(name));
       return permissions.length || options.origins?.length ? remove({ ...options, permissions }) : true;
     };
-    chrome.bookmarks = { getRecent: async () => [], search: async () => [] };
+    const bookmark = { id: 'bookmark-fixture', title: 'Bookmark fixture', url: 'https://bookmark.example/' };
+    chrome.bookmarks = { getRecent: async () => [bookmark], search: async () => [bookmark] };
     chrome.history = { search: async options => {
       globalThis.historyRequest = options;
       return [{ id: 'fixture', title: 'History fixture', url: 'https://history.example/' }];
@@ -200,7 +201,7 @@ test('new-tab website access keeps autocomplete opt-in and explains when Google 
   await expect(page.getByRole('option').filter({ hasText: 'weather ideas' })).toBeVisible();
 });
 
-test('real new-tab override loads browser tabs and switches to a selected tab', async () => {
+test('new-tab routing loads browser tabs and switches to a selected tab', async () => {
   const source = await context.newPage();
   await source.goto('http://127.0.0.1:4173/fixture');
   const page = await context.newPage();
@@ -684,8 +685,9 @@ test('Restore defaults revokes optional grants, cancels suggestions, and lets an
   await source.getByRole('textbox', { name: 'Original field' }).focus();
   await source.bringToFront();
   // This path has broad host access but no toolbar/shortcut activeTab grant.
-  await worker.evaluate(() => chrome.tabs.create({}));
+  const placeholder = await worker.evaluate(() => chrome.tabs.create({}));
   await expect.poll(() => source.frames().find(f => f.url().includes('mode=overlay'))?.url()).toBeTruthy();
+  await expect.poll(() => worker.evaluate(id => chrome.tabs.get(id).then(() => true, () => false), placeholder.id)).toBe(false);
   const frame = source.frames().find(f => f.url().includes('mode=overlay'));
   await expect(frame.getByRole('combobox')).toBeVisible();
   await frame.locator('.footer-settings').click();
@@ -732,4 +734,185 @@ test('Restore defaults reports failed revocation and can retry without re-enabli
   await page.getByRole('button', { name: 'Restore defaults' }).click();
   await expect(page.locator('#settings-status')).toContainText('Optional permissions removed');
   expect((await worker.evaluate(() => chrome.permissions.getAll())).origins || []).toEqual([]);
+});
+
+test('navigation after revoking overlay permission closes the existing UI and preserves the website', async () => {
+  const settings = await commandPage();
+  await enableNewTabOverlay(settings);
+  const source = await context.newPage();
+  await source.goto('http://127.0.0.1:4173/fixture');
+  await source.bringToFront();
+  const placeholder = await worker.evaluate(() => chrome.tabs.create({}));
+  await expect.poll(() => source.frames().find(f => f.url().includes('mode=overlay'))?.url()).toBeTruthy();
+  await expect.poll(() => worker.evaluate(id => chrome.tabs.get(id).then(() => true, () => false), placeholder.id)).toBe(false);
+  const frame = source.frames().find(f => f.url().includes('mode=overlay'));
+  await frame.locator('.footer-settings').click();
+  await frame.getByRole('button', { name: 'Restore defaults' }).click();
+  await expect(frame.locator('#settings-status')).toContainText('Optional permissions removed');
+  await frame.getByRole('button', { name: 'Close settings' }).click();
+  await frame.getByRole('combobox').fill('http://127.0.0.1:4173/newtab.html?after-reset');
+  const created = context.waitForEvent('page');
+  await frame.getByRole('combobox').press('Enter');
+  await expect(await created).toHaveURL('http://127.0.0.1:4173/newtab.html?after-reset');
+  await expect(source.locator('[data-dia-command-bar]')).toHaveCount(0);
+  await expect(source).toHaveURL('http://127.0.0.1:4173/fixture');
+  await expect(source.getByRole('textbox', { name: 'Original field' })).toHaveValue('Keep this text');
+});
+
+test('Restore defaults also removes individual-site grants without the wildcard overlay grant', async () => {
+  const page = await commandPage();
+  const manager = await context.newPage();
+  await manager.goto('chrome://extensions/');
+  await manager.evaluate(id => chrome.developerPrivate.addHostPermission(id, 'https://specific.example/*'), extensionId);
+  await manager.close();
+  await page.bringToFront();
+  expect(await page.evaluate(() => chrome.permissions.request({ origins: ['https://specific.example/*'] }))).toBe(true);
+  expect(await worker.evaluate(() => chrome.permissions.contains({ origins: ['https://specific.example/*'] }))).toBe(true);
+  await page.locator('.footer-settings').click();
+  await page.getByRole('button', { name: 'Restore defaults' }).click();
+  await expect(page.locator('#settings-status')).toContainText('Optional permissions removed');
+  expect((await worker.evaluate(() => chrome.permissions.getAll())).origins || []).toEqual([]);
+});
+
+test('separate new-tab page can be disabled and restored without disabling the extension', async () => {
+  const settings = await commandPage();
+  await settings.locator('.footer-settings').click();
+  await choose(settings, 'New tab', 'Use a separate command page', 'Off');
+  await settings.reload();
+  await settings.locator('.footer-settings').click();
+  await chosen(settings, 'New tab', 'Use a separate command page', 'Off');
+  const next = context.waitForEvent('page');
+  const tab = await worker.evaluate(() => chrome.tabs.create({}));
+  const native = await next;
+  await expect.poll(() => worker.evaluate(id => chrome.tabs.get(id).then(t => t.status), tab.id)).toBe('complete');
+  await expect(native).toHaveURL(/chrome:\/\/(?:newtab|new-tab-page)\//);
+  await expect(native.getByRole('combobox', { name: 'Search tabs, bookmarks, history, or the web' })).toHaveCount(0);
+  // Restricted pages still offer a command page through an explicit invocation.
+  const fallback = context.waitForEvent('page'); await trigger(native);
+  await expect((await fallback).getByRole('combobox')).toBeVisible();
+  await settings.bringToFront();
+  await choose(settings, 'New tab', 'Use a separate command page', 'On');
+  const restored = context.waitForEvent('page');
+  await worker.evaluate(() => chrome.tabs.create({}));
+  await expect((await restored).getByRole('combobox')).toBeVisible();
+  await expect(native).toHaveURL(/chrome:\/\/(?:newtab|new-tab-page)\//);
+});
+
+test('overlay-only mode keeps native homes on restricted pages and in new windows', async () => {
+  const settings = await commandPage();
+  await enableNewTabOverlay(settings);
+  await settings.locator('.footer-settings').click();
+  await choose(settings, 'New tab', 'Use a separate command page', 'Off');
+  const source = await context.newPage(); await source.goto('http://127.0.0.1:4173/fixture');
+  await source.bringToFront();
+  const placeholder = await worker.evaluate(() => chrome.tabs.create({}));
+  await expect.poll(() => worker.evaluate(id => chrome.tabs.get(id).then(() => true, () => false), placeholder.id)).toBe(false);
+  await expect.poll(() => source.frames().find(f => f.url().includes('mode=overlay'))?.url()).toBeTruthy();
+  await source.frames().find(f => f.url().includes('mode=overlay')).getByRole('combobox').press('Escape');
+  await source.goto('chrome://version/'); await source.bringToFront();
+  let next = context.waitForEvent('page');
+  const restricted = await worker.evaluate(() => chrome.tabs.create({}));
+  const native = await next;
+  await expect.poll(() => worker.evaluate(id => chrome.tabs.get(id).then(t => t.status), restricted.id)).toBe('complete');
+  await expect(native).toHaveURL(/chrome:\/\/(?:newtab|new-tab-page)\//);
+  next = context.waitForEvent('page');
+  await worker.evaluate(() => chrome.windows.create({}));
+  await expect(await next).toHaveURL(/chrome:\/\/(?:newtab|new-tab-page)\//);
+});
+
+test('every open-results choice works from overlays and modifier Enter forces a new tab', async () => {
+  const source = await context.newPage(); await source.goto('http://127.0.0.1:4173/fixture');
+  for (const [choice, modified, newTab] of [['Automatic', false, true], ['A new tab', false, true], ['This tab', true, true], ['This tab', false, false]]) {
+    await trigger(source);
+    await expect.poll(() => source.frames().find(f => f.url().includes('mode=overlay'))?.url()).toBeTruthy();
+    const frame = source.frames().find(f => f.url().includes('mode=overlay'));
+    await frame.locator('.footer-settings').click();
+    await choose(frame, 'Search', 'Open results in', choice);
+    await frame.getByRole('button', { name: 'Close settings' }).click();
+    const destination = `http://127.0.0.1:4173/newtab.html?choice=${encodeURIComponent(choice)}&modified=${modified}`;
+    await frame.getByRole('combobox').fill(destination);
+    const next = newTab ? context.waitForEvent('page') : Promise.resolve(source);
+    await frame.getByRole('combobox').press(modified ? 'Control+Enter' : 'Enter');
+    const opened = await next;
+    await expect(opened).toHaveURL(destination);
+    if (newTab) { await expect(source).toHaveURL('http://127.0.0.1:4173/fixture'); await opened.close(); }
+    await expect(source.locator('[data-dia-command-bar]')).toHaveCount(0);
+  }
+});
+
+test('all built-in search engines navigate to their selected provider and shortcuts open browser settings', async () => {
+  const page = await commandPage();
+  await context.route(/https:\/\/(www\.google\.com|duckduckgo\.com|www\.bing\.com|search\.brave\.com)\//, route => route.fulfill({ body: 'Search result' }));
+  for (const [name, prefix] of [['Google', 'https://www.google.com/search?q='], ['DuckDuckGo', 'https://duckduckgo.com/?q='], ['Bing', 'https://www.bing.com/search?q='], ['Brave', 'https://search.brave.com/search?q=']]) {
+    await page.goto(`chrome-extension://${extensionId}/newtab.html`);
+    await page.locator('.footer-settings').click();
+    await choose(page, 'Search', 'Search with', name);
+    await choose(page, 'Search', 'Open results in', 'This tab');
+    await page.getByRole('button', { name: 'Close settings' }).click();
+    await page.getByRole('combobox').fill('tea & coffee'); await page.getByRole('combobox').press('Enter');
+    await expect(page).toHaveURL(`${prefix}tea%20%26%20coffee`);
+  }
+  await page.goto(`chrome-extension://${extensionId}/newtab.html`);
+  await page.locator('.footer-settings').click(); await section(page, 'Shortcuts');
+  const next = context.waitForEvent('page'); await page.getByRole('button', { name: 'Change…' }).click();
+  await expect(await next).toHaveURL('chrome://extensions/shortcuts');
+});
+
+test('bookmark and history controls enable and revoke sources, honor history ranges, and recover from denial', async () => {
+  await grantSourceFixtures([]);
+  const page = await commandPage();
+  // Native API permission prompts cannot be accepted headlessly. Only their
+  // grant/deny result is simulated; the real UI and worker data flow execute.
+  await page.exposeFunction('sourcePermissionFixture', async (names, enabled) => worker.evaluate(({ names, enabled }) => {
+    for (const name of names) enabled ? globalThis.sourceGrants.add(name) : globalThis.sourceGrants.delete(name);
+    return true;
+  }, { names, enabled }));
+  await page.evaluate(() => {
+    chrome.permissions.request = options => window.sourcePermissionFixture(options.permissions, true);
+    chrome.permissions.remove = options => window.sourcePermissionFixture(options.permissions, false);
+  });
+  await page.locator('.footer-settings').click();
+  for (const [name, prefix, title] of [['bookmarks', '*', 'Bookmark fixture'], ['history', '#', 'History fixture']]) {
+    await choose(page, 'Sources', `Search my ${name}`, 'On');
+    if (name === 'history') for (const [label, days] of [['A week', 7], ['A month', 30], ['3 months', 90]]) {
+      await choose(page, 'Sources', 'Look back', label);
+      const request = await worker.evaluate(() => globalThis.historyRequest);
+      expect(Math.abs(request.startTime - (Date.now() - days * 86400000))).toBeLessThan(10000);
+    }
+    await page.getByRole('button', { name: 'Close settings' }).click();
+    await page.getByRole('combobox').fill(`${prefix} fixture`);
+    await expect(page.getByRole('option')).toContainText(title);
+    await page.locator('.footer-settings').click();
+    await choose(page, 'Sources', `Search my ${name}`, 'Off');
+    await page.getByRole('button', { name: 'Close settings' }).click();
+    await expect(page.getByText(`Searching ${name} is off.`)).toBeVisible();
+    await expect(page.getByRole('option')).toHaveCount(0);
+    await page.locator('.footer-settings').click();
+  }
+  await page.evaluate(() => { chrome.permissions.request = async () => false; });
+  await section(page, 'Sources');
+  await page.getByRole('group', { name: 'Search my bookmarks', exact: true }).getByRole('button', { name: 'On', exact: true }).click();
+  await expect(page.locator('#settings-status')).toContainText('Access was not granted');
+  await chosen(page, 'Sources', 'Search my bookmarks', 'Off');
+});
+
+test('font choices persist in the extension and appear in reopened overlays', async () => {
+  const page = await context.newPage(); await page.goto('http://127.0.0.1:4173/fixture');
+  for (const [name, font] of [['Serif', /Iowan Old Style/], ['Mono', /monospace/], ['Dia', /ABC Oracle/]]) {
+    await trigger(page);
+    await expect.poll(() => page.frames().find(f => f.url().includes('mode=overlay'))?.url()).toBeTruthy();
+    let frame = page.frames().find(f => f.url().includes('mode=overlay'));
+    await frame.locator('.footer-settings').click();
+    await choose(frame, 'Appearance', 'Font', name);
+    await expect(frame.locator('#query')).toHaveCSS('font-family', font);
+    await frame.getByRole('button', { name: 'Close settings' }).click();
+    await frame.getByRole('combobox').press('Escape');
+    await expect(page.locator('[data-dia-command-bar]')).toHaveCount(0);
+    await trigger(page);
+    await expect.poll(() => page.frames().find(f => f.url().includes('mode=overlay'))?.url()).toBeTruthy();
+    frame = page.frames().find(f => f.url().includes('mode=overlay'));
+    for (const selector of ['#query', '.result-title', '.palette-footer', 'kbd']) await expect(frame.locator(selector).first()).toHaveCSS('font-family', font);
+    await frame.getByRole('combobox').press('Escape');
+    await expect(page.locator('[data-dia-command-bar]')).toHaveCount(0);
+  }
 });

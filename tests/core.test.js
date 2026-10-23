@@ -56,6 +56,9 @@ test('settings migrate legacy accents, preserve preferences, and reject malforme
   }
   assert.deepEqual(settingsPatch({ radius: 13, width: 9999, historyDays: -1, maxResults: '10', outsideDismiss: 'false', font: 'remote', theme: 'url(evil)', unknown: true }), {});
   assert.deepEqual(normalizeSettings(null), DEFAULT_SETTINGS);
+  assert.equal(normalizeSettings({ openIn: 'current' }).openIn, 'auto');
+  assert.equal(normalizeSettings({ openIn: 'replace' }).openIn, 'replace');
+  assert.equal(normalizeSettings({ newTabPage: false }).newTabPage, false);
 });
 
 test('custom searches validate the template and encode words without allowing executable URLs', () => {
@@ -70,11 +73,13 @@ test('custom searches validate the template and encode words without allowing ex
   assert.throws(() => searchUrl('private words', legacy), /HTTPS/);
 });
 
-test('result limits apply to local matches without dropping the direct action or Google suggestions', () => {
+test('result limits bound the complete list, including searches, suggestions, and actions', () => {
   const tabs = Array.from({ length: 12 }, (_, id) => ({ id, title: `Work ${id}`, url: `https://example.com/${id}` }));
   const results = buildResults({ input: 'work', tabs, settings: { maxResults: 3 }, suggestions: ['work ideas', 'work today'] });
-  assert.equal(results.filter(r => r.kind === 'tab').length, 3);
+  assert.equal(results.length, 3);
+  assert.equal(results.filter(r => r.kind === 'tab').length, 2);
   assert.equal(results[0].id, 'search');
-  assert.equal(results.filter(r => r.suggestion).length, 2);
+  assert.equal(buildResults({ input: 'work', settings: { maxResults: 3 }, suggestions: ['work ideas', 'work today', 'work tomorrow'] }).length, 3);
+  assert.equal(buildResults({ input: '>', settings: { maxResults: 3 } }).length, 3);
   assert.equal(buildResults({ input: '@work', tabs, settings: { maxResults: 10 } }).length, 10);
 });

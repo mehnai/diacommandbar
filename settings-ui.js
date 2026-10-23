@@ -43,7 +43,7 @@ export function createSettingsUI({ dialog, onChange, onReset, onShortcut, clearS
       appearance: [
         choice('theme', 'Theme', [['system', 'Match system'], ['light', 'Light'], ['dark', 'Dark']]),
         choice('accent', 'Accent color', [['mono', 'None'], ['blue', 'Blue', 255], ['green', 'Green', 150], ['orange', 'Orange', 55], ['red', 'Red', 25]], 'Colors the cursor, switches, and highlighted result. Pick None to keep it black and white.'),
-        choice('font', 'Font', [['dia', 'Dia'], ['serif', 'Serif'], ['mono', 'Mono']]),
+        choice('font', 'Font', [['dia', 'Dia'], ['serif', 'Serif'], ['mono', 'Mono']], 'Changes the bar and settings. The clock keeps its display font.'),
         choice('density', 'Spacing', [['compact', 'Compact'], ['default', 'Comfortable'], ['roomy', 'Spacious']]),
         stepper('radius', 'Roundness', 0, 24, 2, v => v === 0 ? 'Square' : `${v}px`),
         stepper('width', 'Bar width', 520, 820, 20, v => `${v}px`),
@@ -58,6 +58,7 @@ export function createSettingsUI({ dialog, onChange, onReset, onShortcut, clearS
         toggle('hints', 'Show keyboard hints'),
       ],
       newtab: [
+        toggle('newTabPage', 'Use a separate command page', 'Off keeps your browser’s own new-tab page. The extension button and shortcut still work; the Overlay setting can still open the bar over websites.'),
         toggle('clock', 'Show date and time'),
         choice('hour12', 'Time format', [[true, '3:30 PM'], [false, '15:30']]),
         choice('position', 'Bar position', [['center', 'Middle'], ['top', 'Higher up']]),
@@ -68,7 +69,7 @@ export function createSettingsUI({ dialog, onChange, onReset, onShortcut, clearS
         ...(s.engine === 'custom' ? [{ key: 'customUrl', label: 'Search address', text: true, desc: 'Paste an HTTPS search link and put %s where your words should go.' }] : []),
         toggle('autocomplete', 'Suggest searches as I type', state.incognito ? 'Query autocomplete is paused in private browsing.' : 'Suggestions come from Google, so what you type is sent there. Your searches still go to the engine above.'),
         stepper('maxResults', 'How many results', 3, 10, 1, v => `${v} results`),
-        choice('openIn', 'Open results in', [['current', 'This tab'], ['new', 'A new tab']], `Hold ${modifier} when you press Enter to always use a new tab.`),
+        choice('openIn', 'Open results in', [['auto', 'Automatic'], ['replace', 'This tab'], ['new', 'A new tab']], `Automatic uses a new tab from an overlay and the current tab from the separate page. Hold ${modifier} when you press Enter to always use a new tab.`),
       ],
       sources: [
         choice('defaultScope', 'Start by searching', [['all', 'Everything'], ['tabs', 'Open tabs'], ['bookmarks', 'Bookmarks'], ['history', 'History'], ['actions', 'Actions']]),
@@ -76,7 +77,7 @@ export function createSettingsUI({ dialog, onChange, onReset, onShortcut, clearS
         toggle('bookmarks', 'Search my bookmarks', 'Your browser will ask for permission first.'),
         toggle('history', 'Search my history', 'Your browser will ask for permission first.'),
         ...(state.permissions.history ? [choice('historyDays', 'Look back', [[7, 'A week'], [30, 'A month'], [90, '3 months']])] : []),
-        { label: 'Everything is matched on your device. Nothing is sent anywhere.', note: true },
+        { label: 'Tab, bookmark, and history matches stay on your device.', note: true },
       ],
       overlay: [
         toggle('newTabOverlay', 'Open new tabs as an overlay', `${modifier}T shows the bar on top of the page you were on instead of a blank page. Needs permission to draw on websites.`),

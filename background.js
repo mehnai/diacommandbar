@@ -133,7 +133,7 @@ async function openPalette(tab, { fallback = true, toggle = true } = {}) {
   return false;
 }
 
-const routeNewTab = createNewTabRouter({
+createNewTabRouter({
   browser: chrome, pageUrl,
   openOverlay: tab => openPalette(tab, { fallback: false, toggle: false }),
   dismissOverlay,
@@ -181,7 +181,7 @@ async function execute(message, sender) {
   const sourceId = sender.tab?.id;
   const { settings: saved } = await chrome.storage.local.get('settings');
   const settings = normalizeSettings(saved);
-  const newTab = overlay || !!message.newTab || settings.openIn === 'new' || !sourceId;
+  const newTab = !!message.newTab || settings.openIn === 'new' || (overlay && settings.openIn === 'auto') || !sourceId;
   const navigate = async url => {
     if (newTab) await chrome.tabs.create({ url, ...(sender.tab?.windowId ? { windowId: sender.tab.windowId } : {}) });
     else await chrome.tabs.update(sourceId, { url });
@@ -244,7 +244,6 @@ async function resetSettings() {
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   (async () => {
     if (!(await authorized(sender))) throw new Error('Open the command bar using the extension button or shortcut.');
-    if (message.type === 'route-new-tab') return routeNewTab(sender);
     if (message.type === 'overlay-ready') {
       if (new URL(sender.url).searchParams.get('mode') !== 'overlay') throw new Error('An overlay is required.');
       const key = overlayKey(sender.tab.id);

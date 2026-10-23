@@ -1,8 +1,8 @@
 export const DEFAULT_SETTINGS = Object.freeze({
   theme: 'system', accent: 'mono', contrast: 'standard', font: 'dia', density: 'default', radius: 14, width: 620, selection: 'solid',
   chips: true, icons: true, kinds: true, hints: true, numbers: false,
-  clock: true, hour12: true, position: 'center', background: 'solid',
-  engine: 'default', customUrl: '', autocomplete: false, maxResults: 6, openIn: 'current',
+  newTabPage: true, clock: true, hour12: true, position: 'center', background: 'solid',
+  engine: 'default', customUrl: '', autocomplete: false, maxResults: 6, openIn: 'auto',
   defaultScope: 'all', allWindows: true, bookmarks: false, history: false, historyDays: 90,
   newTabOverlay: false, outsideDismiss: true, rememberPos: false,
 });
@@ -10,7 +10,9 @@ const SETTING_CHOICES = {
   theme: ['system', 'light', 'dark'], accent: ['mono', 'blue', 'green', 'orange', 'red'], contrast: ['standard', 'high'],
   font: ['dia', 'serif', 'mono'], density: ['compact', 'default', 'roomy'], selection: ['solid', 'soft'],
   position: ['center', 'top'], background: ['solid', 'dots'], engine: ['default', 'google', 'duckduckgo', 'bing', 'brave', 'custom'],
-  openIn: ['current', 'new'], defaultScope: ['all', 'tabs', 'bookmarks', 'history', 'actions'], historyDays: [7, 30, 90],
+  // Legacy "current" behaved like Automatic. A new explicit value avoids
+  // replacing an existing website just because someone upgrades the extension.
+  openIn: ['auto', 'replace', 'new'], defaultScope: ['all', 'tabs', 'bookmarks', 'history', 'actions'], historyDays: [7, 30, 90],
 };
 const SETTING_RANGES = { radius: [0, 24, 2], width: [520, 820, 20], maxResults: [3, 10, 1] };
 
@@ -144,7 +146,7 @@ export function buildResults({ input = '', filter = 'all', tabs = [], bookmarks 
   const parsed = parseQuery(input, filter);
   const { query } = parsed;
   const scope = parsed.filter;
-  if (scope === 'actions') return COMMANDS.map(c => ({ ...c, kind: 'command', subtitle: '' })).filter(c => matchScore(c, query)).sort((a, b) => matchScore(b, query) - matchScore(a, query));
+  if (scope === 'actions') return COMMANDS.map(c => ({ ...c, kind: 'command', subtitle: '' })).filter(c => matchScore(c, query)).sort((a, b) => matchScore(b, query) - matchScore(a, query)).slice(0, options.maxResults);
   const sources = [];
   if (scope === 'all' || scope === 'tabs') sources.push(...tabs.map(t => ({ ...t, kind: 'tab', icon: 'tab', subtitle: displayUrl(t.url), tabId: t.id, id: `tab-${t.id}` })));
   if (scope === 'all' || scope === 'bookmarks') sources.push(...bookmarks.map(b => ({ ...b, kind: 'bookmark', icon: 'bookmark', subtitle: displayUrl(b.url), id: `bookmark-${b.id}` })));
@@ -170,5 +172,5 @@ export function buildResults({ input = '', filter = 'all', tabs = [], bookmarks 
       })));
     }
   }
-  return ranked;
+  return ranked.slice(0, options.maxResults);
 }

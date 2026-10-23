@@ -304,7 +304,11 @@ async function activate(index = selected, newTab = false) {
   if (preview) { status(`Preview only · ${item.kind === 'tab' ? 'Switch to' : 'Open'} ${item.title}. Load the extension to use your real browser.`); return; }
   busy = true;
   cancelAutocomplete();
-  try { await send({ type: 'execute', item, newTab }); status(''); }
+  try {
+    await send({ type: 'execute', item, newTab });
+    if (overlay) window.parent.postMessage({ type: 'dia-command-bar-close' }, '*');
+    status('');
+  }
   catch (error) { status(error.message); await refresh(); }
   finally { busy = false; }
 }
@@ -368,7 +372,7 @@ async function setNewTabOverlay(enabled) {
     if (preview) { status('Load the extension to enable new tabs as an overlay.', true); return; }
     if (enabled) {
       const granted = await chrome.permissions.request({ origins: OVERLAY_ORIGINS });
-      if (!granted) { status('Website access was not granted. New tabs will keep opening the command page.', true); return; }
+      if (!granted) { status('Website access was not granted. Your new-tab page is unchanged.', true); return; }
       state.permissions.newTabOverlay = true;
       if (await saveSettings({ newTabOverlay: true })) status('New-tab overlay enabled. Return to a website, then press ⌘T / Ctrl+T.', true);
     } else {
@@ -424,7 +428,10 @@ async function restoreDefaults() {
 
 async function configureShortcut() {
   if (preview) { status('Load the extension, then configure its shortcut at chrome://extensions/shortcuts.', dialog.open); return; }
-  try { await send({ type: 'execute', item: { kind: 'command', id: 'shortcuts' }, newTab: true }); }
+  try {
+    await send({ type: 'execute', item: { kind: 'command', id: 'shortcuts' }, newTab: true });
+    if (overlay) window.parent.postMessage({ type: 'dia-command-bar-close' }, '*');
+  }
   catch (error) { status(error.message, dialog.open); }
 }
 
@@ -507,16 +514,6 @@ if (window.top !== window.self && (!overlay || !params.get('token'))) {
   if (overlay) enableDragging();
   if (extension && overlay) send({ type: 'overlay-ready' }).catch(() => {});
   const initialize = async () => {
-    if (extension && !overlay && !location.search && !location.hash) {
-      // Run once per document, before accepting input. Refreshing data or
-      // changing settings on an existing command page must never reroute it.
-      busy = true; query.disabled = true;
-      try {
-        const result = await send({ type: 'route-new-tab' });
-        if (result.reason) status(result.reason);
-      } catch { /* The temporary tab may have closed after a successful handoff. */ }
-      finally { busy = false; query.disabled = false; }
-    }
     await refresh(); query.focus();
   };
   initialize();
